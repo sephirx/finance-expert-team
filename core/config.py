@@ -1,10 +1,12 @@
 import os
+from datetime import date
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Optional API keys for fallback data sources
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
+FMP_API_KEY       = os.getenv("FMP_API_KEY", "")
 FRED_API_KEY      = os.getenv("FRED_API_KEY", "")
 NEWS_API_KEY      = os.getenv("NEWS_API_KEY", "")
 
@@ -24,6 +26,6 @@ MAX_POSITION_SIZE = 0.20   # max 20% of portfolio in one stock
 
 # Backtesting
 BACKTEST_START   = "2020-01-01"
-BACKTEST_END     = "2024-12-31"
+BACKTEST_END     = date.today().isoformat()
 INITIAL_CAPITAL  = 100_000
 TRANSACTION_COST = 0.001   # 0.1% per trade

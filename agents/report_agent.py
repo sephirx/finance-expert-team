@@ -2,6 +2,9 @@ import json
 from datetime import datetime
 from core.base_agent import BaseAgent
 
+# Fields to skip in the report (internal, too large, or DataFrame objects)
+_SKIP_FIELDS = {"price_history_csv", "price_df", "spy_df", "source"}
+
 
 class ReportAgent(BaseAgent):
     def __init__(self):
@@ -23,10 +26,12 @@ class ReportAgent(BaseAgent):
                 continue
             data = result.get("data", {})
             for key, val in data.items():
-                if val is None:
+                if key in _SKIP_FIELDS or val is None:
+                    continue
+                # Skip DataFrame objects
+                if hasattr(val, "iloc"):
                     continue
                 if isinstance(val, float):
-                    # Format percentages
                     if any(k in key for k in ["return", "drawdown", "volatility", "growth", "yield", "rate", "var_"]):
                         lines.append(f"- **{key}**: {val:.2%}")
                     else:

@@ -21,7 +21,6 @@ INTENT_MAP = {
 def classify_intent(query: str) -> set[str]:
     q = query.lower()
     matched = {intent for intent, keywords in INTENT_MAP.items() if any(k in q for k in keywords)}
-    # Default: run fundamental + technical if nothing matched
     return matched or {"fundamental", "technical"}
 
 
@@ -30,17 +29,25 @@ class Orchestrator:
         intents = classify_intent(query)
         print(f"\n[Orchestrator] Ticker={ticker} | Intents={intents}")
 
-        # Phase 1: Data (always first, everyone needs it)
+        # Phase 1: Data — downloads ALL price data once, shared with all agents
         print("[Phase 1] Fetching data...")
         data_result = DataAgent().run(ticker)
-        raw_data    = data_result.get("data", {})
+        if data_result.get("error"):
+            return f"ERROR: {data_result['error']}"
+
+        raw_data = data_result.get("data", {})
+        price_df = raw_data.get("price_df")
+        spy_df   = raw_data.get("spy_df")
         all_results = {"DataAgent": data_result}
 
-        # Phase 2: Analysis agents in parallel
+        # Phase 2: Analysis agents in parallel — using shared price data
         phase2 = {}
-        if "fundamental" in intents: phase2["FundamentalAgent"] = (FundamentalAgent(), {"raw_data": raw_data})
-        if "technical"   in intents: phase2["TechnicalAgent"]   = (TechnicalAgent(),   {})
-        if "sentiment"   in intents: phase2["SentimentAgent"]   = (SentimentAgent(),   {})
+        if "fundamental" in intents:
+            phase2["FundamentalAgent"] = (FundamentalAgent(), {"raw_data": raw_data})
+        if "technical" in intents:
+            phase2["TechnicalAgent"] = (TechnicalAgent(), {"price_df": price_df})
+        if "sentiment" in intents:
+            phase2["SentimentAgent"] = (SentimentAgent(), {})
 
         if phase2:
             print(f"[Phase 2] Running in parallel: {list(phase2.keys())}")
@@ -51,8 +58,13 @@ class Orchestrator:
                 }
                 for f in concurrent.futures.as_completed(futures):
                     name = futures[f]
-                    all_results[name] = f.result()
-                    print(f"[Phase 2] {name} done.")
+                    try:
+                        all_results[name] = f.result()
+                    except Exception as e:
+                        all_results[name] = {"agent": name, "ticker": ticker, "data": {}, "error": str(e)}
+                        print(f"[Phase 2] {name} FAILED: {e}")
+                    else:
+                        print(f"[Phase 2] {name} done.")
 
         # Phase 3: Risk + Portfolio (need phase 2 results)
         fund_data = all_results.get("FundamentalAgent", {}).get("data", {})
@@ -62,7 +74,7 @@ class Orchestrator:
         risk_data = {}
         if "risk" in intents or "portfolio" in intents:
             print("[Phase 3] Running RiskAgent...")
-            risk_result = RiskAgent().run(ticker)
+            risk_result = RiskAgent().run(ticker, price_df=price_df, spy_df=spy_df)
             all_results["RiskAgent"] = risk_result
             risk_data = risk_result.get("data", {})
 
@@ -77,10 +89,10 @@ class Orchestrator:
             )
             all_results["PortfolioAgent"] = port_result
 
-        # Phase 4: Backtest (independent)
+        # Phase 4: Backtest (uses shared price data)
         if "backtest" in intents:
             print("[Phase 4] Running BacktestAgent...")
-            all_results["BacktestAgent"] = BacktestAgent().run(ticker)
+            all_results["BacktestAgent"] = BacktestAgent().run(ticker, price_df=price_df)
 
         # Phase 5: Report (always last)
         print("[Phase 5] Generating report...")

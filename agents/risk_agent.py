@@ -1,8 +1,6 @@
 import numpy as np
-import yfinance as yf
 from core.base_agent import BaseAgent
 from core.config import MAX_POSITION_SIZE
-from core.rate_limiter import wait_if_needed
 
 
 class RiskAgent(BaseAgent):
@@ -11,51 +9,66 @@ class RiskAgent(BaseAgent):
 
     def run(self, ticker: str, **kwargs) -> dict:
         try:
-            wait_if_needed("yfinance")
-            df      = yf.download(ticker, period="2y", progress=False)
-            closes  = df["Close"].squeeze()
+            price_df = kwargs.get("price_df")
+            spy_df = kwargs.get("spy_df")
+
+            if price_df is None or price_df.empty:
+                return self._error(ticker, "No price data provided to RiskAgent.")
+
+            closes = price_df["Close"].squeeze().dropna()
             returns = closes.pct_change().dropna()
 
-            vol    = float(returns.std() * np.sqrt(252))
-            var95  = float(np.percentile(returns, 5))
-            cumul  = (1 + returns).cumprod()
-            rm     = cumul.cummax()
+            if len(returns) < 30:
+                return self._error(ticker, "Insufficient data for risk analysis.")
+
+            vol = float(returns.std() * np.sqrt(252))
+            var95 = float(np.percentile(returns, 5))
+
+            cumul = (1 + returns).cumprod()
+            rm = cumul.cummax()
             max_dd = float(((cumul - rm) / rm).min())
 
             # Sharpe (4% risk-free)
             excess = returns - (0.04 / 252)
-            sharpe = float(excess.mean() / returns.std() * np.sqrt(252))
+            ret_std = returns.std()
+            sharpe = float(excess.mean() / ret_std * np.sqrt(252)) if ret_std > 0 else 0.0
 
             # Sortino
-            down   = returns[returns < 0].std()
-            sortino = float(excess.mean() / down * np.sqrt(252)) if down > 0 else 0
+            downside = returns[returns < 0]
+            if len(downside) > 1:
+                down_std = downside.std()
+                sortino = float(excess.mean() / down_std * np.sqrt(252)) if down_std > 0 else 0.0
+            else:
+                sortino = 0.0
 
             # Beta vs SPY
-            wait_if_needed("yfinance")
-            spy        = yf.download("SPY", period="2y", progress=False)
-            spy_ret    = spy["Close"].squeeze().pct_change().dropna()
-            a, b       = returns.align(spy_ret, join="inner")
-            cov        = np.cov(a, b)
-            beta       = float(cov[0][1] / cov[1][1]) if cov[1][1] != 0 else 1.0
+            beta = 1.0
+            if spy_df is not None and not spy_df.empty:
+                spy_ret = spy_df["Close"].squeeze().pct_change().dropna()
+                a, b = returns.align(spy_ret, join="inner")
+                if len(a) > 10:
+                    cov = np.cov(a.values, b.values)
+                    if cov[1][1] != 0:
+                        beta = float(cov[0][1] / cov[1][1])
 
-            # Suggested position size (vol scaling)
-            suggested = min(0.15 / vol, MAX_POSITION_SIZE)
+            # Position sizing
+            suggested = min(0.15 / vol, MAX_POSITION_SIZE) if vol > 0 else MAX_POSITION_SIZE
 
             # Risk level
-            if vol < 0.15:                  risk_level = "LOW"
-            elif vol < 0.25:                risk_level = "MEDIUM"
-            elif vol < 0.40:                risk_level = "HIGH"
-            else:                           risk_level = "VERY HIGH"
+            if vol < 0.15:     risk_level = "LOW"
+            elif vol < 0.25:   risk_level = "MEDIUM"
+            elif vol < 0.40:   risk_level = "HIGH"
+            else:              risk_level = "VERY HIGH"
 
             return self._result(ticker, {
-                "risk_level":              risk_level,
-                "annualized_volatility":   round(vol, 4),
-                "max_drawdown":            round(max_dd, 4),
-                "var_95_daily":            round(var95, 4),
-                "beta_vs_spy":             round(beta, 4),
-                "sharpe_ratio":            round(sharpe, 4),
-                "sortino_ratio":           round(sortino, 4),
-                "suggested_max_position":  round(suggested, 4),
+                "risk_level":             risk_level,
+                "annualized_volatility":  round(vol, 4),
+                "max_drawdown":           round(max_dd, 4),
+                "var_95_daily":           round(var95, 4),
+                "beta_vs_spy":            round(beta, 4),
+                "sharpe_ratio":           round(sharpe, 4),
+                "sortino_ratio":          round(sortino, 4),
+                "suggested_max_position": round(suggested, 4),
             })
 
         except Exception as e:
