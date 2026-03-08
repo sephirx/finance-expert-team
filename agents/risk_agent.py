@@ -23,6 +23,10 @@ class RiskAgent(BaseAgent):
 
             vol = float(returns.std() * np.sqrt(252))
             var95 = float(np.percentile(returns, 5))
+            # CVaR (Expected Shortfall) at 99%
+            var99_cutoff = np.percentile(returns, 1)
+            tail = returns[returns <= var99_cutoff]
+            cvar99 = float(tail.mean()) if len(tail) > 0 else float(var99_cutoff)
 
             cumul = (1 + returns).cumprod()
             rm = cumul.cummax()
@@ -65,6 +69,7 @@ class RiskAgent(BaseAgent):
                 "annualized_volatility":  round(vol, 4),
                 "max_drawdown":           round(max_dd, 4),
                 "var_95_daily":           round(var95, 4),
+                "cvar_99_daily":          round(cvar99, 4),
                 "beta_vs_spy":            round(beta, 4),
                 "sharpe_ratio":           round(sharpe, 4),
                 "sortino_ratio":          round(sortino, 4),
