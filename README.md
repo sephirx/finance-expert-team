@@ -38,12 +38,14 @@ User Query
     │                        TechnicalAgent   → SMA, RSI, MACD, Bollinger Bands
     │                        SentimentAgent   → news sentiment, catalysts
     │
-    ├── Phase 3 (sequential):RiskAgent        → VaR, beta, max drawdown, position sizing
+    ├── Phase 3 (sequential):RiskAgent        → VaR, CVaR, beta, max drawdown, position sizing
     │                        PortfolioAgent   → weighted signal aggregation
     │
     ├── Phase 4 (optional):  BacktestAgent    → SMA crossover strategy backtest
     │
-    └── Phase 5 (always):    ReportAgent      → structured investment memo
+    ├── Phase 5 (always):    ScorecardAgent   → Hit Rate, Calmar, Info Ratio, Team Grade
+    │
+    └── Phase 6 (always):    ReportAgent      → structured investment memo + scorecard
 ```
 
 **Smart routing** — only relevant agents are triggered based on your question:
@@ -119,33 +121,33 @@ See [CLAUDE.md](CLAUDE.md) for Claude Code usage guide.
 ## Example Output
 
 ```
-# AAPL — Finance Expert Team Report
+========================================================
+  PERFORMANCE SCORECARD — AAPL       Grade: A
+========================================================
 
-## FundamentalAgent
-- rating: BUY (score: +2)
-- P/E: 32.9 — expensive but growing
-- ROE: 152% — exceptional profitability
-- Revenue growth: +15.7% YoY
-- Analyst target: $293 → 12.7% upside
+  Team Signal: BUY         Agreement: MODERATE
+    Fundamental: BUY          Technical: BEARISH
+    Sentiment:   N/A
 
-## TechnicalAgent
-- Signal: BULLISH (score: +3)
-- Price above SMA20, SMA50, SMA200
-- RSI 58 — neutral, room to run
-- MACD above signal — bullish momentum
+  Signal Quality
+    Hit Rate (30d):  66.3%   (60d):  62.7%   (90d):  59.1%
+    Information Coefficient: 0.48
 
-## RiskAgent
-- Risk level: MEDIUM
-- Annualized volatility: 28%
-- Beta vs SPY: 1.12
-- Suggested max position: 10%
+  Risk-Adjusted Returns
+    Sharpe:     1.02   Sortino:    1.45
+    Calmar:     0.93   Info Ratio:  0.48
+    Alpha vs SPY: 3.72%
 
-## PortfolioAgent
-- Decision: BUY
-- Conviction: HIGH
-- Recommended position: 10%
-- Entry: $260 | Target: $293 | Stop: $240
+  Risk Profile
+    VaR (95%): -1.92%   CVaR (99%): -3.41%
+    Beta:    1.19   Volatility: 25.08%
+    Max Drawdown: -26.44%   Risk Level: MEDIUM
+    Tracking Error: 7.69%
+
+========================================================
 ```
+
+Each report includes the full scorecard above, followed by detailed agent breakdowns (Fundamental, Technical, Risk, etc.).
 
 ---
 
@@ -155,21 +157,23 @@ See [CLAUDE.md](CLAUDE.md) for Claude Code usage guide.
 finance-expert-team/
 ├── main.py                   ← entry point
 ├── agents/
-│   ├── orchestrator.py       ← routes queries to agents
-│   ├── data_agent.py         ← data fetching + fallback chain
+│   ├── orchestrator.py       ← routes queries to agents (6-phase pipeline)
+│   ├── data_agent.py         ← data fetching + 4-source fallback chain
 │   ├── fundamental_agent.py  ← valuation analysis
 │   ├── technical_agent.py    ← chart indicators
 │   ├── sentiment_agent.py    ← news sentiment
-│   ├── risk_agent.py         ← risk metrics
+│   ├── risk_agent.py         ← VaR, CVaR, beta, Sharpe, Sortino
 │   ├── portfolio_agent.py    ← portfolio decision
 │   ├── backtest_agent.py     ← strategy backtesting
-│   └── report_agent.py       ← report generation
+│   ├── scorecard_agent.py    ← Hit Rate, Calmar, Info Ratio, Team Grade
+│   └── report_agent.py       ← report + scorecard rendering
 ├── core/
-│   ├── base_agent.py         ← base class
+│   ├── base_agent.py         ← base class (no LLM dependency)
 │   ├── config.py             ← settings
-│   ├── message_bus.py        ← inter-agent communication
-│   └── rate_limiter.py       ← API rate limiting
-└── data/cache/               ← auto-cached responses
+│   └── rate_limiter.py       ← API rate limiting with circuit breaker
+├── tests/
+│   └── test_team_performance.py  ← 5-phase performance test suite
+└── data/cache/               ← auto-cached responses (6h expiry)
 ```
 
 ---

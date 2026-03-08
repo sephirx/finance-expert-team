@@ -11,18 +11,24 @@ from agents.report_agent import ReportAgent
 from agents.scorecard_agent import ScorecardAgent
 
 INTENT_MAP = {
-    "fundamental": ["valuation", "value", "worth", "dcf", "pe", "price target", "overvalued", "undervalued", "buy", "sell"],
-    "technical":   ["chart", "technical", "trend", "signal", "entry", "exit", "rsi", "macd", "moving average", "timing"],
-    "sentiment":   ["sentiment", "news", "feeling", "opinion", "analyst", "upgrade", "downgrade", "insider"],
-    "risk":        ["risk", "volatility", "drawdown", "var", "safe", "hedge", "exposure", "position"],
-    "backtest":    ["backtest", "historical", "strategy", "simulate", "test", "past performance"],
+    "fundamental": ["valuation", "value", "worth", "dcf", "pe", "price target", "overvalued", "undervalued", "buy", "sell", "fundamental"],
+    "technical":   ["chart", "technical", "trend", "signal", "entry", "exit", "rsi", "macd", "moving average", "timing", "sma", "ema", "bollinger"],
+    "sentiment":   ["sentiment", "news", "feeling", "opinion", "analyst", "upgrade", "downgrade", "insider", "catalyst"],
+    "risk":        ["risk", "volatility", "volatile", "drawdown", "var", "safe", "hedge", "exposure", "position", "danger"],
+    "backtest":    ["backtest", "historical", "strategy", "simulate", "past performance"],
     "portfolio":   ["portfolio", "allocate", "diversify", "build", "rebalance", "weights", "invest"],
 }
+
+# When "buy"/"sell" alone triggers fundamental, also add technical for full analysis
+_AUTO_PAIR = {"fundamental": "technical", "technical": "fundamental"}
 
 
 def classify_intent(query: str) -> set[str]:
     q = query.lower()
     matched = {intent for intent, keywords in INTENT_MAP.items() if any(k in q for k in keywords)}
+    # Auto-pair: if only fundamental or only technical matched via buy/sell, add the other
+    if matched == {"fundamental"} and any(k in q for k in ["buy", "sell"]):
+        matched.add("technical")
     return matched or {"fundamental", "technical"}
 
 

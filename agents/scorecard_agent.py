@@ -170,21 +170,44 @@ class ScorecardAgent(BaseAgent):
             else:
                 agreement = "N/A"
 
-            # --- Team Grade ---
+            # --- Team Grade (proportional scoring) ---
             grade_score = 0
-            if hit_rates.get("30d") and hit_rates["30d"] > 0.6: grade_score += 1
-            if hit_rates.get("90d") and hit_rates["90d"] > 0.6: grade_score += 1
-            sharpe = risk_data.get("sharpe_ratio", 0)
-            if sharpe > 1:    grade_score += 2
-            elif sharpe > 0.5: grade_score += 1
-            if calmar > 0.5:  grade_score += 1
-            if agreement == "STRONG": grade_score += 1
+            max_score = 0
 
-            if grade_score >= 5:   team_grade = "A"
-            elif grade_score >= 4: team_grade = "B+"
-            elif grade_score >= 3: team_grade = "B"
-            elif grade_score >= 2: team_grade = "C"
-            else:                  team_grade = "D"
+            # Hit rate (2 pts possible)
+            if hit_rates.get("30d") is not None:
+                max_score += 1
+                if hit_rates["30d"] > 0.55: grade_score += 1
+            if hit_rates.get("90d") is not None:
+                max_score += 1
+                if hit_rates["90d"] > 0.55: grade_score += 1
+
+            # Sharpe (2 pts possible)
+            sharpe = risk_data.get("sharpe_ratio", 0)
+            max_score += 2
+            if sharpe > 1:     grade_score += 2
+            elif sharpe > 0.3: grade_score += 1
+
+            # Calmar (1 pt)
+            max_score += 1
+            if calmar > 0.3: grade_score += 1
+
+            # Agreement (1 pt) — only count if agents provided signals
+            if agreement != "N/A":
+                max_score += 1
+                if agreement in ("STRONG", "MODERATE"): grade_score += 1
+
+            # Alpha vs SPY (1 pt)
+            max_score += 1
+            if ann_alpha > 0: grade_score += 1
+
+            # Proportional grade
+            ratio = grade_score / max_score if max_score > 0 else 0
+            if ratio >= 0.75:   team_grade = "A"
+            elif ratio >= 0.60: team_grade = "B+"
+            elif ratio >= 0.45: team_grade = "B"
+            elif ratio >= 0.30: team_grade = "C"
+            else:               team_grade = "D"
 
             return self._result(ticker, {
                 "team_grade":           team_grade,
@@ -200,11 +223,9 @@ class ScorecardAgent(BaseAgent):
                 "information_ratio":    info_ratio,
                 "annualized_alpha":     ann_alpha,
                 "grade_breakdown": {
-                    "hit_rate_points":    1 if (hit_rates.get("30d") or 0) > 0.6 else 0,
-                    "sharpe_points":      2 if sharpe > 1 else (1 if sharpe > 0.5 else 0),
-                    "calmar_points":      1 if calmar > 0.5 else 0,
-                    "agreement_points":   1 if agreement == "STRONG" else 0,
-                    "total":              grade_score,
+                    "score": grade_score,
+                    "max_score": max_score,
+                    "ratio": round(ratio, 2),
                 },
             })
 
