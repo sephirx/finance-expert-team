@@ -274,16 +274,22 @@ class DataAgent(BaseAgent):
                 return self._error(ticker, f"Invalid ticker format: '{ticker}'")
 
             # Download price data ONCE — shared with all agents
-            print(f"[DataAgent] Downloading price data for {ticker}...")
+            t = time.time()
+            print(f"  Downloading {ticker} price data (5yr)...")
             price_df = self._download_prices(ticker)
             if price_df.empty:
                 return self._error(ticker, f"No price data found for {ticker}")
+            print(f"  {ticker} prices: {len(price_df)} rows ({time.time()-t:.1f}s)")
 
-            print(f"[DataAgent] Downloading SPY benchmark...")
+            t = time.time()
+            print(f"  Downloading SPY benchmark...")
             spy_df = self._download_spy()
+            print(f"  SPY prices: {len(spy_df)} rows ({time.time()-t:.1f}s)")
 
             # Fetch fundamental data
+            t = time.time()
             fundamentals = self._fetch_fundamentals(ticker, price_df)
+            print(f"  Fundamentals: done ({time.time()-t:.1f}s)")
 
             # Attach DataFrames (not cached, but passed to other agents)
             fundamentals["price_df"] = price_df

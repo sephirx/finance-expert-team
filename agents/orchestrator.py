@@ -1,3 +1,4 @@
+import time
 import concurrent.futures
 from agents.data_agent import DataAgent
 from agents.fundamental_agent import FundamentalAgent
@@ -24,23 +25,47 @@ def classify_intent(query: str) -> set[str]:
     return matched or {"fundamental", "technical"}
 
 
+def _fmt(seconds: float) -> str:
+    if seconds < 1:
+        return f"{seconds*1000:.0f}ms"
+    return f"{seconds:.1f}s"
+
+
 class Orchestrator:
     def analyze(self, query: str, ticker: str) -> str:
+        total_start = time.time()
         intents = classify_intent(query)
-        print(f"\n[Orchestrator] Ticker={ticker} | Intents={intents}")
 
-        # Phase 1: Data — downloads ALL price data once, shared with all agents
-        print("[Phase 1] Fetching data...")
+        # Count expected agents
+        agent_count = 1  # DataAgent always
+        if "fundamental" in intents: agent_count += 1
+        if "technical" in intents:   agent_count += 1
+        if "sentiment" in intents:   agent_count += 1
+        if "risk" in intents or "portfolio" in intents: agent_count += 1
+        if "portfolio" in intents or ({"fundamental", "technical"} <= intents): agent_count += 1
+        if "backtest" in intents:    agent_count += 1
+        agent_count += 1  # ReportAgent always
+
+        print(f"\n[Orchestrator] Ticker={ticker} | Intents={intents}")
+        print(f"[Orchestrator] Will run {agent_count} agents\n")
+
+        # Phase 1: Data
+        t = time.time()
+        print("[Phase 1/5] Fetching market data...")
         data_result = DataAgent().run(ticker)
+        phase1_time = time.time() - t
+
         if data_result.get("error"):
+            print(f"[Phase 1/5] FAILED ({_fmt(phase1_time)})")
             return f"ERROR: {data_result['error']}"
 
         raw_data = data_result.get("data", {})
         price_df = raw_data.get("price_df")
         spy_df   = raw_data.get("spy_df")
         all_results = {"DataAgent": data_result}
+        print(f"[Phase 1/5] Done ({_fmt(phase1_time)})")
 
-        # Phase 2: Analysis agents in parallel — using shared price data
+        # Phase 2: Analysis agents in parallel
         phase2 = {}
         if "fundamental" in intents:
             phase2["FundamentalAgent"] = (FundamentalAgent(), {"raw_data": raw_data})
@@ -50,36 +75,52 @@ class Orchestrator:
             phase2["SentimentAgent"] = (SentimentAgent(), {})
 
         if phase2:
-            print(f"[Phase 2] Running in parallel: {list(phase2.keys())}")
+            t = time.time()
+            names = list(phase2.keys())
+            print(f"[Phase 2/5] Running {len(names)} agents in parallel: {', '.join(names)}...")
             with concurrent.futures.ThreadPoolExecutor() as ex:
-                futures = {
-                    ex.submit(agent.run, ticker, **kw): name
-                    for name, (agent, kw) in phase2.items()
-                }
+                agent_times = {}
+                futures = {}
+                for name, (agent, kw) in phase2.items():
+                    agent_times[name] = time.time()
+                    futures[ex.submit(agent.run, ticker, **kw)] = name
+
                 for f in concurrent.futures.as_completed(futures):
                     name = futures[f]
+                    elapsed = time.time() - agent_times[name]
                     try:
                         all_results[name] = f.result()
                     except Exception as e:
                         all_results[name] = {"agent": name, "ticker": ticker, "data": {}, "error": str(e)}
-                        print(f"[Phase 2] {name} FAILED: {e}")
+                        print(f"  {name}: FAILED ({_fmt(elapsed)})")
                     else:
-                        print(f"[Phase 2] {name} done.")
+                        print(f"  {name}: done ({_fmt(elapsed)})")
+            print(f"[Phase 2/5] All done ({_fmt(time.time() - t)})")
+        else:
+            print("[Phase 2/5] Skipped — no analysis agents needed")
 
-        # Phase 3: Risk + Portfolio (need phase 2 results)
+        # Phase 3: Risk + Portfolio
         fund_data = all_results.get("FundamentalAgent", {}).get("data", {})
         tech_data = all_results.get("TechnicalAgent",   {}).get("data", {})
         sent_data = all_results.get("SentimentAgent",   {}).get("data", {})
 
         risk_data = {}
+        ran_phase3 = False
+        t = time.time()
+
         if "risk" in intents or "portfolio" in intents:
-            print("[Phase 3] Running RiskAgent...")
+            ran_phase3 = True
+            t2 = time.time()
+            print("[Phase 3/5] Running RiskAgent...")
             risk_result = RiskAgent().run(ticker, price_df=price_df, spy_df=spy_df)
             all_results["RiskAgent"] = risk_result
             risk_data = risk_result.get("data", {})
+            print(f"  RiskAgent: done ({_fmt(time.time() - t2)})")
 
         if "portfolio" in intents or ({"fundamental", "technical"} <= intents):
-            print("[Phase 3] Running PortfolioAgent...")
+            ran_phase3 = True
+            t2 = time.time()
+            print("[Phase 3/5] Running PortfolioAgent...")
             port_result = PortfolioAgent().run(
                 ticker,
                 fundamental=fund_data,
@@ -88,13 +129,29 @@ class Orchestrator:
                 risk=risk_data,
             )
             all_results["PortfolioAgent"] = port_result
+            print(f"  PortfolioAgent: done ({_fmt(time.time() - t2)})")
 
-        # Phase 4: Backtest (uses shared price data)
+        if ran_phase3:
+            print(f"[Phase 3/5] All done ({_fmt(time.time() - t)})")
+        else:
+            print("[Phase 3/5] Skipped")
+
+        # Phase 4: Backtest
         if "backtest" in intents:
-            print("[Phase 4] Running BacktestAgent...")
+            t = time.time()
+            print("[Phase 4/5] Running BacktestAgent...")
             all_results["BacktestAgent"] = BacktestAgent().run(ticker, price_df=price_df)
+            print(f"[Phase 4/5] Done ({_fmt(time.time() - t)})")
+        else:
+            print("[Phase 4/5] Skipped — no backtest requested")
 
-        # Phase 5: Report (always last)
-        print("[Phase 5] Generating report...")
+        # Phase 5: Report
+        t = time.time()
+        print("[Phase 5/5] Generating report...")
         report_result = ReportAgent().run(ticker, all_results=all_results)
+        print(f"[Phase 5/5] Done ({_fmt(time.time() - t)})")
+
+        total = time.time() - total_start
+        print(f"\n[Orchestrator] Total time: {_fmt(total)}")
+
         return report_result["data"]["report_text"]
