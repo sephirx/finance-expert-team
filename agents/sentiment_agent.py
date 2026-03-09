@@ -49,6 +49,11 @@ class SentimentAgent(BaseAgent):
             return []
 
     def run(self, ticker: str, **kwargs) -> dict:
+        if not ticker or not isinstance(ticker, str):
+            return self._error(str(ticker), "Invalid ticker for SentimentAgent.")
+        if not isinstance(ticker, str) or len(ticker) > 10:
+            return self._error(ticker, "Ticker format invalid for SentimentAgent.")
+
         try:
             news = self._fetch_av_news(ticker) or self._fetch_newsapi(ticker)
 

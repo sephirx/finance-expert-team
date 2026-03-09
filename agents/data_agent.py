@@ -268,6 +268,9 @@ class DataAgent(BaseAgent):
 
     def run(self, ticker: str, **kwargs) -> dict:
         try:
+            if not ticker or not isinstance(ticker, str):
+                return self._error(str(ticker), "Ticker must be a non-empty string.")
+
             # Validate ticker
             ticker = ticker.upper().strip()
             if not ticker.isalpha() or len(ticker) > 5:

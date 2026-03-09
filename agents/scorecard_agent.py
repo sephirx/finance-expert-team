@@ -81,6 +81,9 @@ class ScorecardAgent(BaseAgent):
         return round(alpha / tracking_error, 4)
 
     def run(self, ticker: str, **kwargs) -> dict:
+        if not ticker or not isinstance(ticker, str):
+            return self._error(str(ticker), "Invalid ticker for ScorecardAgent.")
+
         try:
             price_df     = kwargs.get("price_df")
             spy_df       = kwargs.get("spy_df")

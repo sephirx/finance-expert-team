@@ -12,12 +12,18 @@ class PortfolioAgent(BaseAgent):
     _SENT_MAP = {"POSITIVE": 1, "NEUTRAL": 0, "NEGATIVE": -1}
 
     def run(self, ticker: str, **kwargs) -> dict:
-        try:
-            fund_data = kwargs.get("fundamental", {})
-            tech_data = kwargs.get("technical", {})
-            sent_data = kwargs.get("sentiment", {})
-            risk_data = kwargs.get("risk", {})
+        if not ticker or not isinstance(ticker, str):
+            return self._error(str(ticker), "Invalid ticker for PortfolioAgent.")
 
+        fund_data = kwargs.get("fundamental", {})
+        tech_data = kwargs.get("technical", {})
+        sent_data = kwargs.get("sentiment", {})
+        risk_data = kwargs.get("risk", {})
+
+        if not fund_data and not tech_data:
+            return self._error(ticker, "No fundamental or technical data for PortfolioAgent.")
+
+        try:
             fund_score = self._FUND_MAP.get(fund_data.get("rating", "HOLD"), 0)
             tech_score = self._TECH_MAP.get(tech_data.get("signal", "NEUTRAL"), 0)
             sent_score = self._SENT_MAP.get(sent_data.get("overall_sentiment", "NEUTRAL"), 0)

@@ -17,6 +17,9 @@ class FundamentalAgent(BaseAgent):
         super().__init__("FundamentalAgent")
 
     def run(self, ticker: str, **kwargs) -> dict:
+        if not ticker or not isinstance(ticker, str):
+            return self._error(str(ticker), "Invalid ticker for FundamentalAgent.")
+
         raw = kwargs.get("raw_data", {})
         if not raw:
             return self._error(ticker, "No raw data provided to FundamentalAgent.")

@@ -9,6 +9,9 @@ class BacktestAgent(BaseAgent):
 
     def run(self, ticker: str, **kwargs) -> dict:
         try:
+            if not ticker or not isinstance(ticker, str):
+                return self._error(ticker, "Invalid ticker for BacktestAgent.")
+
             price_df = kwargs.get("price_df")
             if price_df is None or price_df.empty:
                 return self._error(ticker, "No price data provided to BacktestAgent.")

@@ -9,6 +9,7 @@ from agents.portfolio_agent import PortfolioAgent
 from agents.backtest_agent import BacktestAgent
 from agents.report_agent import ReportAgent
 from agents.scorecard_agent import ScorecardAgent
+from regulation.runtime_guards import RegulationContext
 
 INTENT_MAP = {
     "fundamental": ["valuation", "value", "worth", "dcf", "pe", "price target", "overvalued", "undervalued", "buy", "sell", "fundamental"],
@@ -43,6 +44,9 @@ class Orchestrator:
         total_start = time.time()
         intents = classify_intent(query)
 
+        # Tier 1 Regulation: runtime context
+        reg_ctx = RegulationContext()
+
         # Count expected agents
         agent_count = 1  # DataAgent always
         if "fundamental" in intents: agent_count += 1
@@ -70,6 +74,7 @@ class Orchestrator:
         price_df = raw_data.get("price_df")
         spy_df   = raw_data.get("spy_df")
         all_results = {"DataAgent": data_result}
+        reg_ctx.check_agent(data_result, "DataAgent")
         print(f"[Phase 1/6] Done ({_fmt(phase1_time)})")
 
         # Phase 2: Analysis agents in parallel
@@ -102,6 +107,7 @@ class Orchestrator:
                         print(f"  {name}: FAILED ({_fmt(elapsed)})")
                     else:
                         print(f"  {name}: done ({_fmt(elapsed)})")
+                    reg_ctx.check_agent(all_results[name], name)
             print(f"[Phase 2/6] All done ({_fmt(time.time() - t)})")
         else:
             print("[Phase 2/6] Skipped — no analysis agents needed")
@@ -123,6 +129,7 @@ class Orchestrator:
             risk_result = RiskAgent().run(ticker, price_df=price_df, spy_df=spy_df)
             all_results["RiskAgent"] = risk_result
             risk_data = risk_result.get("data", {})
+            reg_ctx.check_agent(risk_result, "RiskAgent")
             print(f"  RiskAgent: done ({_fmt(time.time() - t2)})")
 
         if "portfolio" in intents or ({"fundamental", "technical"} <= intents):
@@ -137,6 +144,7 @@ class Orchestrator:
                 risk=risk_data,
             )
             all_results["PortfolioAgent"] = port_result
+            reg_ctx.check_agent(port_result, "PortfolioAgent")
             print(f"  PortfolioAgent: done ({_fmt(time.time() - t2)})")
 
         if ran_phase3:
@@ -148,7 +156,9 @@ class Orchestrator:
         if "backtest" in intents:
             t = time.time()
             print("[Phase 4/6] Running BacktestAgent...")
-            all_results["BacktestAgent"] = BacktestAgent().run(ticker, price_df=price_df)
+            bt_result = BacktestAgent().run(ticker, price_df=price_df)
+            all_results["BacktestAgent"] = bt_result
+            reg_ctx.check_agent(bt_result, "BacktestAgent")
             print(f"[Phase 4/6] Done ({_fmt(time.time() - t)})")
         else:
             print("[Phase 4/6] Skipped — no backtest requested")
@@ -168,14 +178,32 @@ class Orchestrator:
             portfolio=all_results.get("PortfolioAgent", {}).get("data", {}),
         )
         all_results["ScorecardAgent"] = scorecard_result
+        reg_ctx.check_agent(scorecard_result, "ScorecardAgent")
         grade = scorecard_result.get("data", {}).get("team_grade", "?")
         print(f"[Phase 5/6] Done — Team Grade: {grade} ({_fmt(time.time() - t)})")
 
         # Phase 6: Report
         t = time.time()
         print("[Phase 6/6] Generating report...")
-        report_result = ReportAgent().run(ticker, all_results=all_results)
+        report_result = ReportAgent().run(
+            ticker,
+            all_results=all_results,
+            regulation_ctx=reg_ctx,
+        )
+        reg_ctx.check_agent(report_result, "ReportAgent")
         print(f"[Phase 6/6] Done ({_fmt(time.time() - t)})")
+
+        # Tier 1 Regulation summary
+        reg_summary = reg_ctx.summary()
+        status = "COMPLIANT" if reg_ctx.is_compliant() else "NON-COMPLIANT"
+        print(f"\n[Regulation] Tier 1 Status: {status}")
+        print(f"[Regulation] Agents: {reg_summary['agents_passed']}/{reg_summary['agents_checked']} passed")
+        if reg_summary["runtime_violations"] > 0:
+            print(f"[Regulation] Violations: {reg_summary['runtime_violations']}")
+            for v in reg_summary["violations"][:5]:
+                print(f"  - {v}")
+        if reg_summary["runtime_warnings"] > 0:
+            print(f"[Regulation] Warnings: {reg_summary['runtime_warnings']}")
 
         total = time.time() - total_start
         print(f"\n[Orchestrator] Total time: {_fmt(total)}")
