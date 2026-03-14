@@ -1,3 +1,8 @@
+"""
+Orchestrator — manages the multi-agent analysis pipeline.
+All functions ≤60 lines (R4). No recursion (R1).
+"""
+
 import time
 import concurrent.futures
 from agents.data_agent import DataAgent
@@ -6,206 +11,182 @@ from agents.technical_agent import TechnicalAgent
 from agents.sentiment_agent import SentimentAgent
 from agents.risk_agent import RiskAgent
 from agents.portfolio_agent import PortfolioAgent
-from agents.backtest_agent import BacktestAgent
 from agents.report_agent import ReportAgent
 from agents.scorecard_agent import ScorecardAgent
 from regulation.runtime_guards import RegulationContext
-
-INTENT_MAP = {
-    "fundamental": ["valuation", "value", "worth", "dcf", "pe", "price target", "overvalued", "undervalued", "buy", "sell", "fundamental"],
-    "technical":   ["chart", "technical", "trend", "signal", "entry", "exit", "rsi", "macd", "moving average", "timing", "sma", "ema", "bollinger"],
-    "sentiment":   ["sentiment", "news", "feeling", "opinion", "analyst", "upgrade", "downgrade", "insider", "catalyst"],
-    "risk":        ["risk", "volatility", "volatile", "drawdown", "var", "safe", "hedge", "exposure", "position", "danger"],
-    "backtest":    ["backtest", "historical", "strategy", "simulate", "past performance"],
-    "portfolio":   ["portfolio", "allocate", "diversify", "build", "rebalance", "weights", "invest"],
-}
-
-# When "buy"/"sell" alone triggers fundamental, also add technical for full analysis
-_AUTO_PAIR = {"fundamental": "technical", "technical": "fundamental"}
-
-
-def classify_intent(query: str) -> set[str]:
-    q = query.lower()
-    matched = {intent for intent, keywords in INTENT_MAP.items() if any(k in q for k in keywords)}
-    # Auto-pair: if only fundamental or only technical matched via buy/sell, add the other
-    if matched == {"fundamental"} and any(k in q for k in ["buy", "sell"]):
-        matched.add("technical")
-    return matched or {"fundamental", "technical"}
+from core.intent_router import classify_intent_fallback, ALL_AGENTS
+from memory.portfolio_store import PortfolioStore
+from memory.memory_manager import MemoryManager
 
 
 def _fmt(seconds: float) -> str:
-    if seconds < 1:
-        return f"{seconds*1000:.0f}ms"
-    return f"{seconds:.1f}s"
+    return f"{seconds*1000:.0f}ms" if seconds < 1 else f"{seconds:.1f}s"
+
+
+def _resolve_intents(query: str, agents: list[str] | None) -> set[str]:
+    """Determine which agents to run."""
+    if agents:
+        intents = set(a for a in agents if a in ALL_AGENTS)
+    else:
+        intents = set(classify_intent_fallback(query))
+    intents.add("risk")  # always needed for scorecard
+    return intents
+
+
+def _run_phase2(intents, ticker, raw_data, price_df, reg_ctx):
+    """Phase 2: run analysis agents in parallel. Returns all_results dict."""
+    phase2 = {}
+    if "fundamental" in intents:
+        phase2["FundamentalAgent"] = (FundamentalAgent(), {"raw_data": raw_data})
+    if "technical" in intents:
+        phase2["TechnicalAgent"] = (TechnicalAgent(), {"price_df": price_df})
+    if "sentiment" in intents:
+        phase2["SentimentAgent"] = (SentimentAgent(), {})
+
+    results = {}
+    if not phase2:
+        print("[Phase 2/5] Skipped — no analysis agents needed")
+        return results
+
+    t = time.time()
+    names = list(phase2.keys())
+    print(f"[Phase 2/5] Running {len(names)} agents in parallel: {', '.join(names)}...")
+    with concurrent.futures.ThreadPoolExecutor() as ex:
+        agent_times = {}
+        futures = {}
+        for name, (agent, kw) in phase2.items():
+            agent_times[name] = time.time()
+            futures[ex.submit(agent.run, ticker, **kw)] = name
+
+        for f in concurrent.futures.as_completed(futures):
+            name = futures[f]
+            elapsed = time.time() - agent_times[name]
+            try:
+                results[name] = f.result()
+            except Exception as e:
+                results[name] = {"agent": name, "ticker": ticker, "data": {}, "error": str(e)}
+                print(f"  {name}: FAILED ({_fmt(elapsed)})")
+            else:
+                print(f"  {name}: done ({_fmt(elapsed)})")
+            reg_ctx.check_agent(results[name], name)
+    print(f"[Phase 2/5] All done ({_fmt(time.time() - t)})")
+    return results
+
+
+def _run_phase3(intents, ticker, fund, tech, sent, risk_data, price_df, spy_df, store, reg_ctx):
+    """Phase 3: risk + portfolio. Returns (risk_result, port_result|None)."""
+    results = {}
+    t = time.time()
+    print("[Phase 3/5] Running RiskAgent...")
+    risk_result = RiskAgent().run(ticker, price_df=price_df, spy_df=spy_df)
+    results["RiskAgent"] = risk_result
+    r_data = risk_result.get("data", {})
+    reg_ctx.check_agent(risk_result, "RiskAgent")
+    print(f"  RiskAgent: done ({_fmt(time.time() - t)})")
+
+    if "portfolio" in intents or ({"fundamental", "technical"} <= intents):
+        t2 = time.time()
+        print("[Phase 3/5] Running PortfolioAgent...")
+        port_result = PortfolioAgent().run(
+            ticker, fundamental=fund, technical=tech,
+            sentiment=sent, risk=r_data, portfolio_store=store,
+        )
+        results["PortfolioAgent"] = port_result
+        reg_ctx.check_agent(port_result, "PortfolioAgent")
+        print(f"  PortfolioAgent: done ({_fmt(time.time() - t2)})")
+
+    print(f"[Phase 3/5] All done ({_fmt(time.time() - t)})")
+    return results, r_data
+
+
+def _save_to_memory(mm, ticker, query, sc_data, fund, tech, sent, raw_data):
+    """Save analysis results to memory."""
+    price = raw_data.get("current_price") or tech.get("current_price")
+    mm.record_analysis(
+        ticker=ticker, team_signal=sc_data.get("team_signal", "HOLD"),
+        team_grade=sc_data.get("team_grade", "?"),
+        fundamental_signal=fund.get("rating", "N/A"),
+        technical_signal=tech.get("signal", "N/A"),
+        sentiment_signal=sent.get("overall_sentiment", "N/A"),
+        price_at_analysis=price, query=query,
+    )
 
 
 class Orchestrator:
-    def analyze(self, query: str, ticker: str) -> str:
+    def analyze(self, query: str, ticker: str,
+                agents: list[str] | None = None, output_format: str = "text") -> str:
         total_start = time.time()
-        intents = classify_intent(query)
+        intents = _resolve_intents(query, agents)
+        store = PortfolioStore()
+        mm = MemoryManager()
 
-        # Tier 1 Regulation: runtime context
+        last = mm.get_last_analysis(ticker)
+        if last:
+            print(f"[Memory] Last analysis of {ticker}: {last.date} — "
+                  f"Signal={last.team_signal}, Grade={last.team_grade}")
+
         reg_ctx = RegulationContext()
-
-        # Count expected agents
-        agent_count = 1  # DataAgent always
-        if "fundamental" in intents: agent_count += 1
-        if "technical" in intents:   agent_count += 1
-        if "sentiment" in intents:   agent_count += 1
-        if "risk" in intents or "portfolio" in intents: agent_count += 1
-        if "portfolio" in intents or ({"fundamental", "technical"} <= intents): agent_count += 1
-        if "backtest" in intents:    agent_count += 1
-        agent_count += 1  # ReportAgent always
-
-        print(f"\n[Orchestrator] Ticker={ticker} | Intents={intents}")
-        print(f"[Orchestrator] Will run {agent_count} agents\n")
+        print(f"\n[Orchestrator] Ticker={ticker} | Agents={intents}")
 
         # Phase 1: Data
         t = time.time()
-        print("[Phase 1/6] Fetching market data...")
+        print("[Phase 1/5] Fetching market data...")
         data_result = DataAgent().run(ticker)
-        phase1_time = time.time() - t
-
         if data_result.get("error"):
-            print(f"[Phase 1/6] FAILED ({_fmt(phase1_time)})")
+            print(f"[Phase 1/5] FAILED ({_fmt(time.time() - t)})")
             return f"ERROR: {data_result['error']}"
-
         raw_data = data_result.get("data", {})
         price_df = raw_data.get("price_df")
-        spy_df   = raw_data.get("spy_df")
+        spy_df = raw_data.get("spy_df")
         all_results = {"DataAgent": data_result}
         reg_ctx.check_agent(data_result, "DataAgent")
-        print(f"[Phase 1/6] Done ({_fmt(phase1_time)})")
+        print(f"[Phase 1/5] Done ({_fmt(time.time() - t)})")
 
-        # Phase 2: Analysis agents in parallel
-        phase2 = {}
-        if "fundamental" in intents:
-            phase2["FundamentalAgent"] = (FundamentalAgent(), {"raw_data": raw_data})
-        if "technical" in intents:
-            phase2["TechnicalAgent"] = (TechnicalAgent(), {"price_df": price_df})
-        if "sentiment" in intents:
-            phase2["SentimentAgent"] = (SentimentAgent(), {})
-
-        if phase2:
-            t = time.time()
-            names = list(phase2.keys())
-            print(f"[Phase 2/6] Running {len(names)} agents in parallel: {', '.join(names)}...")
-            with concurrent.futures.ThreadPoolExecutor() as ex:
-                agent_times = {}
-                futures = {}
-                for name, (agent, kw) in phase2.items():
-                    agent_times[name] = time.time()
-                    futures[ex.submit(agent.run, ticker, **kw)] = name
-
-                for f in concurrent.futures.as_completed(futures):
-                    name = futures[f]
-                    elapsed = time.time() - agent_times[name]
-                    try:
-                        all_results[name] = f.result()
-                    except Exception as e:
-                        all_results[name] = {"agent": name, "ticker": ticker, "data": {}, "error": str(e)}
-                        print(f"  {name}: FAILED ({_fmt(elapsed)})")
-                    else:
-                        print(f"  {name}: done ({_fmt(elapsed)})")
-                    reg_ctx.check_agent(all_results[name], name)
-            print(f"[Phase 2/6] All done ({_fmt(time.time() - t)})")
-        else:
-            print("[Phase 2/6] Skipped — no analysis agents needed")
+        # Phase 2: Analysis
+        p2 = _run_phase2(intents, ticker, raw_data, price_df, reg_ctx)
+        all_results.update(p2)
+        fund = p2.get("FundamentalAgent", {}).get("data", {})
+        tech = p2.get("TechnicalAgent", {}).get("data", {})
+        sent = p2.get("SentimentAgent", {}).get("data", {})
 
         # Phase 3: Risk + Portfolio
-        fund_data = all_results.get("FundamentalAgent", {}).get("data", {})
-        tech_data = all_results.get("TechnicalAgent",   {}).get("data", {})
-        sent_data = all_results.get("SentimentAgent",   {}).get("data", {})
+        p3, risk_data = _run_phase3(intents, ticker, fund, tech, sent,
+                                     {}, price_df, spy_df, store, reg_ctx)
+        all_results.update(p3)
 
-        risk_data = {}
-        ran_phase3 = False
+        # Phase 4: Scorecard
         t = time.time()
-
-        # RiskAgent always runs — scorecard needs it
-        if True:
-            ran_phase3 = True
-            t2 = time.time()
-            print("[Phase 3/6] Running RiskAgent...")
-            risk_result = RiskAgent().run(ticker, price_df=price_df, spy_df=spy_df)
-            all_results["RiskAgent"] = risk_result
-            risk_data = risk_result.get("data", {})
-            reg_ctx.check_agent(risk_result, "RiskAgent")
-            print(f"  RiskAgent: done ({_fmt(time.time() - t2)})")
-
-        if "portfolio" in intents or ({"fundamental", "technical"} <= intents):
-            ran_phase3 = True
-            t2 = time.time()
-            print("[Phase 3/6] Running PortfolioAgent...")
-            port_result = PortfolioAgent().run(
-                ticker,
-                fundamental=fund_data,
-                technical=tech_data,
-                sentiment=sent_data,
-                risk=risk_data,
-            )
-            all_results["PortfolioAgent"] = port_result
-            reg_ctx.check_agent(port_result, "PortfolioAgent")
-            print(f"  PortfolioAgent: done ({_fmt(time.time() - t2)})")
-
-        if ran_phase3:
-            print(f"[Phase 3/6] All done ({_fmt(time.time() - t)})")
-        else:
-            print("[Phase 3/6] Skipped")
-
-        # Phase 4: Backtest
-        if "backtest" in intents:
-            t = time.time()
-            print("[Phase 4/6] Running BacktestAgent...")
-            bt_result = BacktestAgent().run(ticker, price_df=price_df)
-            all_results["BacktestAgent"] = bt_result
-            reg_ctx.check_agent(bt_result, "BacktestAgent")
-            print(f"[Phase 4/6] Done ({_fmt(time.time() - t)})")
-        else:
-            print("[Phase 4/6] Skipped — no backtest requested")
-
-        # Phase 5: Scorecard (always — aggregates all signals)
-        t = time.time()
-        print("[Phase 5/6] Computing performance scorecard...")
-        scorecard_result = ScorecardAgent().run(
-            ticker,
-            price_df=price_df,
-            spy_df=spy_df,
-            fundamental=fund_data,
-            technical=tech_data,
-            sentiment=sent_data,
-            risk=risk_data,
-            backtest=all_results.get("BacktestAgent", {}).get("data", {}),
-            portfolio=all_results.get("PortfolioAgent", {}).get("data", {}),
+        print("[Phase 4/5] Computing performance scorecard...")
+        sc_result = ScorecardAgent().run(
+            ticker, price_df=price_df, spy_df=spy_df,
+            fundamental=fund, technical=tech, sentiment=sent,
+            risk=risk_data, portfolio=all_results.get("PortfolioAgent", {}).get("data", {}),
         )
-        all_results["ScorecardAgent"] = scorecard_result
-        reg_ctx.check_agent(scorecard_result, "ScorecardAgent")
-        grade = scorecard_result.get("data", {}).get("team_grade", "?")
-        print(f"[Phase 5/6] Done — Team Grade: {grade} ({_fmt(time.time() - t)})")
+        all_results["ScorecardAgent"] = sc_result
+        reg_ctx.check_agent(sc_result, "ScorecardAgent")
+        grade = sc_result.get("data", {}).get("team_grade", "?")
+        print(f"[Phase 4/5] Done — Team Grade: {grade} ({_fmt(time.time() - t)})")
 
-        # Phase 6: Report
+        # Phase 5: Report
         t = time.time()
-        print("[Phase 6/6] Generating report...")
-        report_result = ReportAgent().run(
-            ticker,
-            all_results=all_results,
-            regulation_ctx=reg_ctx,
-        )
-        reg_ctx.check_agent(report_result, "ReportAgent")
-        print(f"[Phase 6/6] Done ({_fmt(time.time() - t)})")
+        print("[Phase 5/5] Generating report...")
+        rpt = ReportAgent().run(ticker, all_results=all_results,
+                                regulation_ctx=reg_ctx, output_format=output_format,
+                                portfolio_store=store)
+        reg_ctx.check_agent(rpt, "ReportAgent")
+        print(f"[Phase 5/5] Done ({_fmt(time.time() - t)})")
 
-        # Tier 1 Regulation summary
-        reg_summary = reg_ctx.summary()
+        _save_to_memory(mm, ticker, query, sc_result.get("data", {}), fund, tech, sent, raw_data)
+        self._print_regulation(reg_ctx)
+        print(f"\n[Orchestrator] Total time: {_fmt(time.time() - total_start)}")
+        return rpt["data"]["report_text"]
+
+    def _print_regulation(self, reg_ctx):
+        s = reg_ctx.summary()
         status = "COMPLIANT" if reg_ctx.is_compliant() else "NON-COMPLIANT"
         print(f"\n[Regulation] Tier 1 Status: {status}")
-        print(f"[Regulation] Agents: {reg_summary['agents_passed']}/{reg_summary['agents_checked']} passed")
-        if reg_summary["runtime_violations"] > 0:
-            print(f"[Regulation] Violations: {reg_summary['runtime_violations']}")
-            for v in reg_summary["violations"][:5]:
+        print(f"[Regulation] Agents: {s['agents_passed']}/{s['agents_checked']} passed")
+        if s["runtime_violations"] > 0:
+            print(f"[Regulation] Violations: {s['runtime_violations']}")
+            for v in s["violations"][:5]:
                 print(f"  - {v}")
-        if reg_summary["runtime_warnings"] > 0:
-            print(f"[Regulation] Warnings: {reg_summary['runtime_warnings']}")
-
-        total = time.time() - total_start
-        print(f"\n[Orchestrator] Total time: {_fmt(total)}")
-
-        return report_result["data"]["report_text"]

@@ -1,14 +1,12 @@
 import os
-from datetime import date
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Optional API keys for fallback data sources
-ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
-FMP_API_KEY       = os.getenv("FMP_API_KEY", "")
-FRED_API_KEY      = os.getenv("FRED_API_KEY", "")
-NEWS_API_KEY      = os.getenv("NEWS_API_KEY", "")
+# API keys
+FINANCIAL_DATASETS_API_KEY = os.getenv("FINANCIAL_DATASETS_API_KEY", "")
+ALPHA_VANTAGE_KEY          = os.getenv("ALPHA_VANTAGE_KEY", "")
+NEWS_API_KEY               = os.getenv("NEWS_API_KEY", "")
 
 # Cache
 CACHE_DIR          = os.path.join(os.path.dirname(__file__), "..", "data", "cache")
@@ -24,8 +22,13 @@ SIGNAL_WEIGHTS = {
 # Risk limits
 MAX_POSITION_SIZE = 0.20   # max 20% of portfolio in one stock
 
-# Backtesting
-BACKTEST_START   = "2020-01-01"
-BACKTEST_END     = date.today().isoformat()
-INITIAL_CAPITAL  = 100_000
-TRANSACTION_COST = 0.001   # 0.1% per trade
+# Data paths
+DATA_DIR           = os.path.join(os.path.dirname(__file__), "..", "data")
+PORTFOLIO_STATE_PATH   = os.path.join(DATA_DIR, "portfolio_state.json")
+ANALYSIS_HISTORY_PATH  = os.path.join(DATA_DIR, "analysis_history.json")
+
+# Reports
+REPORTS_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
+
+# financialdatasets.ai
+FDS_BASE_URL = "https://api.financialdatasets.ai"

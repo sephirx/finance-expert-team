@@ -1,19 +1,25 @@
+"""
+DataAgent — fetches market data from financialdatasets.ai (Point 2).
+
+Primary: financialdatasets.ai REST API (fundamentals + price history)
+Fallback: yfinance (price data only, if API key missing)
+"""
+
 import json
 import os
 import hashlib
 import time
 import requests
-import yfinance as yf
 import pandas as pd
 from core.base_agent import BaseAgent
-from core.config import CACHE_DIR, CACHE_EXPIRY_HOURS, ALPHA_VANTAGE_KEY, FMP_API_KEY
+from core.config import (
+    CACHE_DIR, CACHE_EXPIRY_HOURS,
+    FINANCIAL_DATASETS_API_KEY, FDS_BASE_URL,
+)
 from core.rate_limiter import wait_if_needed
+from core.data_normalizer import normalize_financialdatasets, compute_data_quality
 
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
-AV_BASE  = "https://www.alphavantage.co/query"
-
-# Fields that go into cache (no large DataFrames)
-_CACHE_EXCLUDE = {"price_df", "spy_df"}
+_CACHE_EXCLUDE = {"price_df", "spy_df", "data_quality"}
 
 
 def _safe_float(val):
@@ -32,57 +38,175 @@ class DataAgent(BaseAgent):
 
     # ------------------------------------------------------------------ cache
 
-    def _cache_path(self, ticker: str, source: str = "") -> str:
-        key = hashlib.md5(f"{ticker}_{source}".encode()).hexdigest()
+    def _cache_path(self, ticker: str) -> str:
+        key = hashlib.md5(f"{ticker}_fds".encode()).hexdigest()
         return os.path.join(CACHE_DIR, f"{key}.json")
 
     def _load_cache(self, ticker: str) -> dict | None:
-        # Try full-quality sources first
-        for source in ["yfinance", "alpha_vantage", "financial_modeling_prep", "stooq", ""]:
-            path = self._cache_path(ticker, source)
-            if not os.path.exists(path):
-                continue
-            age_hours = (time.time() - os.path.getmtime(path)) / 3600
-            if age_hours > CACHE_EXPIRY_HOURS:
-                os.remove(path)
-                continue
-            with open(path) as f:
-                return json.load(f)
-        return None
+        path = self._cache_path(ticker)
+        if not os.path.exists(path):
+            return None
+        age_hours = (time.time() - os.path.getmtime(path)) / 3600
+        if age_hours > CACHE_EXPIRY_HOURS:
+            os.remove(path)
+            return None
+        with open(path) as f:
+            return json.load(f)
 
     def _save_cache(self, ticker: str, data: dict):
         os.makedirs(CACHE_DIR, exist_ok=True)
-        source = data.get("source", "")
         cacheable = {k: v for k, v in data.items() if k not in _CACHE_EXCLUDE}
-        with open(self._cache_path(ticker, source), "w") as f:
+        with open(self._cache_path(ticker), "w") as f:
             json.dump(cacheable, f)
 
-    # ------------------------------------------------ price data (shared)
+    # ------------------------------------------------ API helpers
+
+    def _fds_headers(self) -> dict:
+        return {"X-API-KEY": FINANCIAL_DATASETS_API_KEY}
+
+    def _fds_get(self, endpoint: str, params: dict) -> dict | None:
+        """Make a GET request to financialdatasets.ai."""
+        wait_if_needed("financialdatasets")
+        url = f"{FDS_BASE_URL}{endpoint}"
+        try:
+            r = requests.get(url, params=params, headers=self._fds_headers(), timeout=15)
+            if r.status_code == 200:
+                return r.json()
+            print(f"[DataAgent] FDS {endpoint} returned {r.status_code}")
+            return None
+        except Exception as e:
+            print(f"[DataAgent] FDS {endpoint} error: {e}")
+            return None
+
+    # ------------------------------------------------ price data
+
+    def _download_prices_fds(self, ticker: str) -> pd.DataFrame:
+        """Download price history from financialdatasets.ai."""
+        data = self._fds_get("/prices/historical", {
+            "ticker": ticker,
+            "interval": "day",
+            "interval_multiplier": 1,
+            "start_date": "2020-01-01",
+        })
+        if not data or "prices" not in data:
+            return pd.DataFrame()
+
+        prices = data["prices"]
+        if not prices:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(prices)
+        # Map columns to standard OHLCV format
+        col_map = {}
+        for col in df.columns:
+            cl = col.lower()
+            if "open" in cl: col_map[col] = "Open"
+            elif "high" in cl: col_map[col] = "High"
+            elif "low" in cl: col_map[col] = "Low"
+            elif "close" in cl and "adj" not in cl: col_map[col] = "Close"
+            elif "volume" in cl: col_map[col] = "Volume"
+            elif "date" in cl or "time" in cl: col_map[col] = "Date"
+        df = df.rename(columns=col_map)
+
+        if "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"])
+            df = df.set_index("Date").sort_index()
+
+        return df
+
+    def _download_prices_yfinance(self, ticker: str) -> pd.DataFrame:
+        """Fallback: download prices from yfinance."""
+        try:
+            import yfinance as yf
+            df = yf.download(ticker, period="5y", progress=False)
+            if df.empty:
+                return df
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            return df
+        except Exception as e:
+            print(f"[DataAgent] yfinance fallback failed: {e}")
+            return pd.DataFrame()
 
     def _download_prices(self, ticker: str) -> pd.DataFrame:
-        """Download max available price data once. All agents use this."""
-        wait_if_needed("yfinance")
-        df = yf.download(ticker, period="5y", progress=False)
-        if df.empty:
-            return df
-        # Flatten MultiIndex columns if needed
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df
+        """Download prices — try financialdatasets.ai first, fallback to yfinance."""
+        if FINANCIAL_DATASETS_API_KEY:
+            df = self._download_prices_fds(ticker)
+            if not df.empty:
+                return df
+            print("[DataAgent] FDS prices empty, falling back to yfinance...")
+
+        return self._download_prices_yfinance(ticker)
 
     def _download_spy(self) -> pd.DataFrame:
-        """Download SPY benchmark data. Used by RiskAgent."""
-        wait_if_needed("yfinance")
-        df = yf.download("SPY", period="5y", progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df
+        """Download SPY benchmark data."""
+        if FINANCIAL_DATASETS_API_KEY:
+            df = self._download_prices_fds("SPY")
+            if not df.empty:
+                return df
 
-    # --------------------------------------------------------- data sources
+        return self._download_prices_yfinance("SPY")
 
-    def _from_yfinance(self, ticker: str, price_df: pd.DataFrame) -> dict | None:
+    # ------------------------------------------------ fundamental data
+
+    def _fetch_fds_fundamentals(self, ticker: str) -> dict | None:
+        """Fetch fundamentals from financialdatasets.ai endpoints."""
+        if not FINANCIAL_DATASETS_API_KEY:
+            return None
+
+        print(f"[DataAgent] Fetching fundamentals from financialdatasets.ai...")
+
+        income = self._fds_get("/financial-statements/income-statements", {
+            "ticker": ticker, "period": "ttm", "limit": 1,
+        })
+        balance = self._fds_get("/financial-statements/balance-sheets", {
+            "ticker": ticker, "period": "quarterly", "limit": 1,
+        })
+        cashflow = self._fds_get("/financial-statements/cash-flow-statements", {
+            "ticker": ticker, "period": "ttm", "limit": 1,
+        })
+        snapshot = self._fds_get("/financial-metrics/snapshot", {
+            "ticker": ticker,
+        })
+
+        # Extract first record from each list response
+        inc_data = None
+        if income and "income_statements" in income:
+            stmts = income["income_statements"]
+            inc_data = stmts[0] if stmts else None
+
+        bal_data = None
+        if balance and "balance_sheets" in balance:
+            sheets = balance["balance_sheets"]
+            bal_data = sheets[0] if sheets else None
+
+        cf_data = None
+        if cashflow and "cash_flow_statements" in cashflow:
+            stmts = cashflow["cash_flow_statements"]
+            cf_data = stmts[0] if stmts else None
+
+        snap_data = None
+        if snapshot and "snapshot" in snapshot:
+            snap_data = snapshot["snapshot"]
+        elif snapshot:
+            snap_data = snapshot
+
+        if not inc_data and not snap_data:
+            return None
+
+        normalized = normalize_financialdatasets(
+            ticker=ticker,
+            income=inc_data,
+            balance=bal_data,
+            cashflow=cf_data,
+            snapshot=snap_data,
+        )
+        return normalized
+
+    def _fetch_yfinance_fundamentals(self, ticker: str) -> dict | None:
+        """Fallback: fetch fundamentals from yfinance."""
         try:
-            wait_if_needed("yfinance")
+            import yfinance as yf
             stock = yf.Ticker(ticker)
             info = stock.info or {}
             if not info.get("regularMarketPrice") and not info.get("currentPrice"):
@@ -114,154 +238,40 @@ class DataAgent(BaseAgent):
                 "recommendation":  info.get("recommendationKey"),
             }
         except Exception as e:
-            print(f"[DataAgent] yfinance failed for {ticker}: {e}")
+            print(f"[DataAgent] yfinance fundamentals failed: {e}")
             return None
 
-    def _from_alpha_vantage(self, ticker: str) -> dict | None:
-        if not ALPHA_VANTAGE_KEY:
-            return None
-        try:
-            wait_if_needed("alpha_vantage")
-            r = requests.get(f"{AV_BASE}?function=OVERVIEW&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}", timeout=10)
-            data = r.json()
-            if not data.get("Symbol"):
-                return None
-
-            wait_if_needed("alpha_vantage")
-            price_data = requests.get(f"{AV_BASE}?function=GLOBAL_QUOTE&symbol={ticker}&apikey={ALPHA_VANTAGE_KEY}", timeout=10).json()
-            quote = price_data.get("Global Quote", {})
-
-            return {
-                "source":          "alpha_vantage",
-                "ticker":          ticker,
-                "name":            data.get("Name", ticker),
-                "sector":          data.get("Sector", "N/A"),
-                "industry":        data.get("Industry", "N/A"),
-                "market_cap":      _safe_float(data.get("MarketCapitalization")),
-                "current_price":   _safe_float(quote.get("05. price")),
-                "52w_high":        _safe_float(data.get("52WeekHigh")),
-                "52w_low":         _safe_float(data.get("52WeekLow")),
-                "pe_ratio":        _safe_float(data.get("PERatio")),
-                "forward_pe":      _safe_float(data.get("ForwardPE")),
-                "pb_ratio":        _safe_float(data.get("PriceToBookRatio")),
-                "ev_ebitda":       _safe_float(data.get("EVToEBITDA")),
-                "roe":             _safe_float(data.get("ReturnOnEquityTTM")),
-                "roa":             _safe_float(data.get("ReturnOnAssetsTTM")),
-                "debt_to_equity":  _safe_float(data.get("DebtToEquityRatio")),
-                "free_cashflow":   _safe_float(data.get("FreeCashflow")),
-                "revenue_growth":  _safe_float(data.get("QuarterlyRevenueGrowthYOY")),
-                "earnings_growth": _safe_float(data.get("QuarterlyEarningsGrowthYOY")),
-                "dividend_yield":  _safe_float(data.get("DividendYield")),
-                "beta":            _safe_float(data.get("Beta")),
-                "analyst_target":  _safe_float(data.get("AnalystTargetPrice")),
-                "recommendation":  None,
-            }
-        except Exception as e:
-            print(f"[DataAgent] Alpha Vantage failed for {ticker}: {e}")
-            return None
-
-    def _from_fmp(self, ticker: str) -> dict | None:
-        api_key = FMP_API_KEY or "demo"
-        if api_key == "demo":
-            return None  # demo key only works for AAPL, skip
-        try:
-            wait_if_needed("financial_modeling_prep")
-            r = requests.get(f"{FMP_BASE}/profile/{ticker}?apikey={api_key}", timeout=10)
-            data = r.json()
-            if not data or not isinstance(data, list):
-                return None
-            d = data[0]
-            rng = d.get("range", "")
-            return {
-                "source":          "financial_modeling_prep",
-                "ticker":          ticker,
-                "name":            d.get("companyName", ticker),
-                "sector":          d.get("sector", "N/A"),
-                "industry":        d.get("industry", "N/A"),
-                "market_cap":      _safe_float(d.get("mktCap")),
-                "current_price":   _safe_float(d.get("price")),
-                "52w_high":        _safe_float(rng.split("-")[-1].strip()) if rng else None,
-                "52w_low":         _safe_float(rng.split("-")[0].strip()) if rng else None,
-                "pe_ratio":        None,
-                "forward_pe":      None,
-                "pb_ratio":        None,
-                "ev_ebitda":       None,
-                "roe":             _safe_float(d.get("roe")),
-                "roa":             None,
-                "debt_to_equity":  None,
-                "free_cashflow":   None,
-                "revenue_growth":  None,
-                "earnings_growth": None,
-                "dividend_yield":  None,
-                "beta":            _safe_float(d.get("beta")),
-                "analyst_target":  None,
-                "recommendation":  None,
-            }
-        except Exception as e:
-            print(f"[DataAgent] FMP failed for {ticker}: {e}")
-            return None
-
-    def _from_stooq(self, ticker: str) -> dict | None:
-        try:
-            import pandas_datareader.data as web
-            wait_if_needed("stooq")
-            df = web.DataReader(ticker, "stooq")
-            if df.empty:
-                return None
-            return {
-                "source":          "stooq",
-                "ticker":          ticker,
-                "name":            ticker,
-                "sector":          "N/A",
-                "industry":        "N/A",
-                "market_cap":      None,
-                "current_price":   float(df["Close"].iloc[0]),
-                "52w_high":        float(df["High"].max()),
-                "52w_low":         float(df["Low"].min()),
-                "pe_ratio":        None,
-                "forward_pe":      None,
-                "pb_ratio":        None,
-                "ev_ebitda":       None,
-                "roe":             None,
-                "roa":             None,
-                "debt_to_equity":  None,
-                "free_cashflow":   None,
-                "revenue_growth":  None,
-                "earnings_growth": None,
-                "dividend_yield":  None,
-                "beta":            None,
-                "analyst_target":  None,
-                "recommendation":  None,
-            }
-        except Exception as e:
-            print(f"[DataAgent] Stooq failed for {ticker}: {e}")
-            return None
-
-    # ------------------------------------------------- fallback orchestration
-
-    _SOURCES = ["_from_yfinance", "_from_alpha_vantage", "_from_fmp", "_from_stooq"]
-
-    def _fetch_fundamentals(self, ticker: str, price_df: pd.DataFrame) -> dict:
+    def _fetch_fundamentals(self, ticker: str) -> dict:
+        """Fetch fundamentals — financialdatasets.ai first, yfinance fallback."""
         cached = self._load_cache(ticker)
         if cached:
             print(f"[DataAgent] Loaded {ticker} from cache (source: {cached.get('source')}).")
             return cached
 
-        for method_name in self._SOURCES:
-            source = method_name.replace("_from_", "")
-            print(f"[DataAgent] Trying {source} for {ticker}...")
-            if method_name == "_from_yfinance":
-                result = self._from_yfinance(ticker, price_df)
-            else:
-                result = getattr(self, method_name)(ticker)
-            if result:
-                print(f"[DataAgent] Got data from {source}.")
-                self._save_cache(ticker, result)
-                return result
+        # Try financialdatasets.ai first
+        result = self._fetch_fds_fundamentals(ticker)
+        if result:
+            quality = compute_data_quality(result)
+            result["data_quality"] = quality
+            print(f"[DataAgent] Got data from financialdatasets.ai "
+                  f"({quality['fields_populated']}/{quality['fields_total']} fields).")
+            self._save_cache(ticker, result)
+            return result
+
+        # Fallback to yfinance
+        print("[DataAgent] FDS unavailable, falling back to yfinance...")
+        result = self._fetch_yfinance_fundamentals(ticker)
+        if result:
+            quality = compute_data_quality(result)
+            result["data_quality"] = quality
+            print(f"[DataAgent] Got data from yfinance "
+                  f"({quality['fields_populated']}/{quality['fields_total']} fields).")
+            self._save_cache(ticker, result)
+            return result
 
         raise RuntimeError(
             f"All data sources failed for {ticker}. "
-            "Check your API keys in .env or try again later."
+            "Set FINANCIAL_DATASETS_API_KEY in .env or try again later."
         )
 
     # --------------------------------------------------------------- run
@@ -271,14 +281,13 @@ class DataAgent(BaseAgent):
             if not ticker or not isinstance(ticker, str):
                 return self._error(str(ticker), "Ticker must be a non-empty string.")
 
-            # Validate ticker
             ticker = ticker.upper().strip()
             if not ticker.isalpha() or len(ticker) > 5:
                 return self._error(ticker, f"Invalid ticker format: '{ticker}'")
 
-            # Download price data ONCE — shared with all agents
+            # Download price data
             t = time.time()
-            print(f"  Downloading {ticker} price data (5yr)...")
+            print(f"  Downloading {ticker} price data...")
             price_df = self._download_prices(ticker)
             if price_df.empty:
                 return self._error(ticker, f"No price data found for {ticker}")
@@ -291,7 +300,7 @@ class DataAgent(BaseAgent):
 
             # Fetch fundamental data
             t = time.time()
-            fundamentals = self._fetch_fundamentals(ticker, price_df)
+            fundamentals = self._fetch_fundamentals(ticker)
             print(f"  Fundamentals: done ({time.time()-t:.1f}s)")
 
             # Attach DataFrames (not cached, but passed to other agents)

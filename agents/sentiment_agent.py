@@ -1,6 +1,6 @@
 import requests
 from core.base_agent import BaseAgent
-from core.config import ALPHA_VANTAGE_KEY, NEWS_API_KEY
+from core.config import ALPHA_VANTAGE_KEY, NEWS_API_KEY, FINANCIAL_DATASETS_API_KEY, FDS_BASE_URL
 from core.rate_limiter import wait_if_needed
 
 AV_BASE   = "https://www.alphavantage.co/query"
@@ -48,14 +48,36 @@ class SentimentAgent(BaseAgent):
         except Exception:
             return []
 
+    def _fetch_fds_news(self, ticker: str) -> list[dict]:
+        """Fetch news from financialdatasets.ai."""
+        if not FINANCIAL_DATASETS_API_KEY:
+            return []
+        try:
+            wait_if_needed("financialdatasets")
+            url = f"{FDS_BASE_URL}/news"
+            r = requests.get(url, params={"ticker": ticker, "limit": 10},
+                             headers={"X-API-KEY": FINANCIAL_DATASETS_API_KEY}, timeout=15)
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            articles = data.get("news", data.get("articles", []))
+            return [
+                {
+                    "title":     item.get("title"),
+                    "source":    item.get("source", {}).get("name") if isinstance(item.get("source"), dict) else item.get("source"),
+                    "sentiment": item.get("sentiment", "unknown"),
+                    "score":     item.get("sentiment_score", 0),
+                }
+                for item in articles[:10]
+            ]
+        except Exception:
+            return []
+
     def run(self, ticker: str, **kwargs) -> dict:
         if not ticker or not isinstance(ticker, str):
             return self._error(str(ticker), "Invalid ticker for SentimentAgent.")
-        if not isinstance(ticker, str) or len(ticker) > 10:
-            return self._error(ticker, "Ticker format invalid for SentimentAgent.")
-
         try:
-            news = self._fetch_av_news(ticker) or self._fetch_newsapi(ticker)
+            news = self._fetch_fds_news(ticker) or self._fetch_av_news(ticker) or self._fetch_newsapi(ticker)
 
             # Aggregate sentiment score
             scored = [n for n in news if n.get("score") != 0]
@@ -81,7 +103,7 @@ class SentimentAgent(BaseAgent):
                 "neutral_count":      neutral,
                 "total_articles":     len(news),
                 "headlines":          [n["title"] for n in news[:5] if n.get("title")],
-                "data_source":        "alpha_vantage" if ALPHA_VANTAGE_KEY else ("newsapi" if NEWS_API_KEY else "none"),
+                "data_source":        "financialdatasets" if FINANCIAL_DATASETS_API_KEY else ("alpha_vantage" if ALPHA_VANTAGE_KEY else ("newsapi" if NEWS_API_KEY else "none")),
                 "note":               "No news API key configured." if not news else None,
             })
 

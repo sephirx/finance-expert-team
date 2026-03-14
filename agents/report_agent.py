@@ -1,193 +1,171 @@
+"""
+ReportAgent — generates analysis reports.
+Supports text (Markdown) and html (Plotly) output.
+All functions ≤60 lines (R4). No recursion (R1).
+"""
+
 import json
 from datetime import datetime
 from core.base_agent import BaseAgent
 from regulation.runtime_guards import RegulationContext
 
-_SKIP_FIELDS = {"price_history_csv", "price_df", "spy_df", "source", "grade_breakdown"}
+_SKIP_FIELDS = {"price_history_csv", "price_df", "spy_df", "source",
+                "grade_breakdown", "series", "data_quality", "portfolio_context"}
+
+
+def _pct(v):
+    return f"{v:.1%}" if v is not None else "N/A"
+
+
+def _flt(v, d=2):
+    return f"{v:.{d}f}" if v is not None else "N/A"
+
+
+def _build_scorecard_text(sc, risk, ticker):
+    """Build the ASCII scorecard block."""
+    if not sc:
+        return ""
+    grade = sc.get("team_grade", "?")
+    signal = sc.get("team_signal", "?")
+    agree = sc.get("signal_agreement", "?")
+    sigs = sc.get("agent_signals", {})
+
+    lines = ["", "```", f"{'='*56}",
+             f"  PERFORMANCE SCORECARD — {ticker}       Grade: {grade}",
+             f"{'='*56}", "",
+             f"  Team Signal: {signal:<10}  Agreement: {agree}",
+             f"    Fundamental: {sigs.get('fundamental', 'N/A'):<12} Technical: {sigs.get('technical', 'N/A')}",
+             f"    Sentiment:   {sigs.get('sentiment', 'N/A')}", "",
+             f"  Signal Quality",
+             f"    Hit Rate (30d): {_pct(sc.get('hit_rate_30d')):>7}   "
+             f"(60d): {_pct(sc.get('hit_rate_60d')):>7}   (90d): {_pct(sc.get('hit_rate_90d')):>7}",
+             f"    Information Coefficient: {_flt(sc.get('information_ratio'))}", "",
+             f"  Risk-Adjusted Returns",
+             f"    Sharpe:  {_flt(risk.get('sharpe_ratio')):>7}   Sortino: {_flt(risk.get('sortino_ratio')):>7}",
+             f"    Calmar:  {_flt(sc.get('calmar_ratio')):>7}   Info Ratio: {_flt(sc.get('information_ratio')):>7}",
+             f"    Alpha vs SPY: {_pct(sc.get('annualized_alpha'))}", "",
+             f"  Risk Profile",
+             f"    VaR (95%): {_pct(risk.get('var_95_daily')):>7}   CVaR (99%): {_pct(risk.get('cvar_99_daily')):>7}",
+             f"    Beta: {_flt(risk.get('beta_vs_spy')):>7}   Volatility: {_pct(risk.get('annualized_volatility')):>7}",
+             f"    Max Drawdown: {_pct(risk.get('max_drawdown')):>7}   Risk Level: {risk.get('risk_level')}",
+             f"    Tracking Error: {_pct(sc.get('tracking_error'))}", "",
+             f"{'='*56}", "```", ""]
+    return "\n".join(lines)
+
+
+def _build_portfolio_text(all_results):
+    """Build portfolio context section."""
+    ctx = all_results.get("PortfolioAgent", {}).get("data", {}).get("portfolio_context", {})
+    if not ctx or not ctx.get("has_portfolio"):
+        return ""
+    lines = ["## Portfolio Context"]
+    if ctx.get("currently_held"):
+        lines.append(f"- **Currently held**: {ctx.get('holding_shares', 0)} shares "
+                     f"@ ${ctx.get('avg_cost', 0):.2f}")
+        lines.append(f"- **Unrealized P&L**: {ctx.get('unrealized_pnl_pct', 0):+.1f}%")
+        lines.append(f"- **Position size**: {ctx.get('current_position_pct', 0):.1f}% of portfolio")
+    for s in ctx.get("suggestions", []):
+        lines.append(f"- {s}")
+    for w in ctx.get("warnings", []):
+        lines.append(f"- **WARNING**: {w}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_regulation_text(reg_ctx):
+    """Build regulation compliance section."""
+    if reg_ctx is None:
+        return ""
+    s = reg_ctx.summary()
+    status = "COMPLIANT" if reg_ctx.is_compliant() else "NON-COMPLIANT"
+    lines = ["", "```", f"{'='*56}", "  TIER 1 REGULATION — Runtime Compliance",
+             f"{'='*56}", "", f"  Status:     {status}",
+             f"  Agents:     {s['agents_passed']}/{s['agents_checked']} passed",
+             f"  Violations: {s['runtime_violations']}", f"  Warnings:   {s['runtime_warnings']}", ""]
+    if s["violations"]:
+        lines.append("  Issues:")
+        for v in s["violations"]:
+            lines.append(f"    - {v}")
+        lines.append("")
+    lines.extend(["  Rules: R1 R2 R3 R5 R7 R9 (Power of Ten — Holzmann)",
+                  f"{'='*56}", "```", ""])
+    return "\n".join(lines)
+
+
+def _format_agent_data(data):
+    """Format agent data dict into Markdown lines."""
+    lines = []
+    for key, val in data.items():
+        if key in _SKIP_FIELDS or val is None or hasattr(val, "iloc"):
+            continue
+        if isinstance(val, float):
+            is_pct = any(k in key for k in ["return", "drawdown", "volatility",
+                                             "growth", "yield", "rate", "var_", "cvar"])
+            lines.append(f"- **{key}**: {val:.2%}" if is_pct else f"- **{key}**: {val:.4f}")
+        elif isinstance(val, list):
+            lines.append(f"- **{key}**:")
+            for item in val[:20]:  # R3: bounded
+                lines.append(f"  - {item}")
+        elif isinstance(val, dict):
+            lines.append(f"- **{key}**: {json.dumps(val)}")
+        else:
+            lines.append(f"- **{key}**: {val}")
+    return lines
 
 
 class ReportAgent(BaseAgent):
     def __init__(self):
         super().__init__("ReportAgent")
 
-    def _build_scorecard(self, all_results: dict, ticker: str) -> str:
-        sc = all_results.get("ScorecardAgent", {}).get("data", {})
-        risk = all_results.get("RiskAgent", {}).get("data", {})
-        bt = all_results.get("BacktestAgent", {}).get("data", {})
-
-        if not sc:
-            return ""
-
-        def pct(v):
-            return f"{v:.1%}" if v is not None else "N/A"
-
-        def flt(v, d=2):
-            return f"{v:.{d}f}" if v is not None else "N/A"
-
-        grade    = sc.get("team_grade", "?")
-        signal   = sc.get("team_signal", "?")
-        agree    = sc.get("signal_agreement", "?")
-        hr30     = sc.get("hit_rate_30d")
-        hr60     = sc.get("hit_rate_60d")
-        hr90     = sc.get("hit_rate_90d")
-        calmar   = sc.get("calmar_ratio")
-        cvar     = sc.get("cvar_99_daily")
-        te       = sc.get("tracking_error")
-        ir       = sc.get("information_ratio")
-        alpha    = sc.get("annualized_alpha")
-        sharpe   = risk.get("sharpe_ratio")
-        sortino  = risk.get("sortino_ratio")
-        var95    = risk.get("var_95_daily")
-        cvar99   = risk.get("cvar_99_daily")
-        maxdd    = risk.get("max_drawdown")
-        beta     = risk.get("beta_vs_spy")
-        vol      = risk.get("annualized_volatility")
-        rlevel   = risk.get("risk_level")
-        bt_ret   = bt.get("total_return")
-        bh_ret   = bt.get("buy_and_hold_return")
-        bt_verd  = bt.get("verdict")
-
-        signals  = sc.get("agent_signals", {})
-        fund_sig = signals.get("fundamental", "N/A")
-        tech_sig = signals.get("technical", "N/A")
-        sent_sig = signals.get("sentiment", "N/A")
-
-        lines = []
-        lines.append("")
-        lines.append("```")
-        lines.append(f"{'='*56}")
-        lines.append(f"  PERFORMANCE SCORECARD — {ticker}       Grade: {grade}")
-        lines.append(f"{'='*56}")
-        lines.append(f"")
-        lines.append(f"  Team Signal: {signal:<10}  Agreement: {agree}")
-        lines.append(f"    Fundamental: {fund_sig:<12} Technical: {tech_sig}")
-        lines.append(f"    Sentiment:   {sent_sig}")
-        lines.append(f"")
-        lines.append(f"  Signal Quality")
-        lines.append(f"    Hit Rate (30d): {pct(hr30):>7}   (60d): {pct(hr60):>7}   (90d): {pct(hr90):>7}")
-        lines.append(f"    Information Coefficient: {flt(ir)}")
-        lines.append(f"")
-        lines.append(f"  Risk-Adjusted Returns")
-        lines.append(f"    Sharpe:  {flt(sharpe):>7}   Sortino: {flt(sortino):>7}")
-        lines.append(f"    Calmar:  {flt(calmar):>7}   Info Ratio: {flt(ir):>7}")
-        lines.append(f"    Alpha vs SPY: {pct(alpha)}")
-        lines.append(f"")
-        lines.append(f"  Risk Profile")
-        lines.append(f"    VaR (95%): {pct(var95):>7}   CVaR (99%): {pct(cvar99):>7}")
-        lines.append(f"    Beta: {flt(beta):>7}   Volatility: {pct(vol):>7}")
-        lines.append(f"    Max Drawdown: {pct(maxdd):>7}   Risk Level: {rlevel}")
-        lines.append(f"    Tracking Error: {pct(te)}")
-        lines.append(f"")
-
-        if bt_ret is not None:
-            lines.append(f"  Backtest (SMA 50/200)")
-            lines.append(f"    Strategy: {pct(bt_ret):>7}   Buy&Hold: {pct(bh_ret):>7}")
-            lines.append(f"    Verdict: {bt_verd}")
-            lines.append(f"")
-
-        lines.append(f"{'='*56}")
-        lines.append("```")
-        lines.append("")
-
-        return "\n".join(lines)
-
-    def _build_regulation_section(self, reg_ctx: RegulationContext | None) -> str:
-        """Build Tier 1 Regulation compliance section for the report."""
-        if reg_ctx is None:
-            return ""
-
-        summary = reg_ctx.summary()
-        status = "COMPLIANT" if reg_ctx.is_compliant() else "NON-COMPLIANT"
-
-        lines = []
-        lines.append("")
-        lines.append("```")
-        lines.append(f"{'='*56}")
-        lines.append(f"  TIER 1 REGULATION — Runtime Compliance")
-        lines.append(f"{'='*56}")
-        lines.append(f"")
-        lines.append(f"  Status:     {status}")
-        lines.append(f"  Agents:     {summary['agents_passed']}/{summary['agents_checked']} passed")
-        lines.append(f"  Violations: {summary['runtime_violations']}")
-        lines.append(f"  Warnings:   {summary['runtime_warnings']}")
-        lines.append(f"")
-
-        if summary["violations"]:
-            lines.append(f"  Issues:")
-            for v in summary["violations"]:
-                lines.append(f"    - {v}")
-            lines.append(f"")
-
-        lines.append(f"  Rules Enforced:")
-        lines.append(f"    R1: No Recursion          R2: Bounded Loops")
-        lines.append(f"    R3: Memory Bounds          R5: I/O Validation")
-        lines.append(f"    R7: Error Propagation      R9: Nesting Depth")
-        lines.append(f"")
-        lines.append(f"  Source: Power of Ten (NASA/JPL) — G. Holzmann")
-        lines.append(f"{'='*56}")
-        lines.append("```")
-        lines.append("")
-
-        return "\n".join(lines)
-
     def run(self, ticker: str, **kwargs) -> dict:
         if not ticker or not isinstance(ticker, str):
             return self._error(str(ticker), "Invalid ticker for ReportAgent.")
-
         all_results = kwargs.get("all_results", {})
         if not all_results:
             return self._error(ticker, "No agent results provided to ReportAgent.")
 
         reg_ctx = kwargs.get("regulation_ctx")
+        fmt = kwargs.get("output_format", "text")
+        store = kwargs.get("portfolio_store")
 
-        lines = []
-        lines.append(f"# {ticker} — Finance Expert Team Report")
-        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+        text = self._build_text(ticker, all_results, reg_ctx)
+        result = {"report_text": text}
 
-        # Scorecard first if available
-        scorecard = self._build_scorecard(all_results, ticker)
-        if scorecard:
-            lines.append(scorecard)
+        if fmt in ("html", "both"):
+            try:
+                result["html_report_path"] = self._build_html(ticker, all_results, store)
+            except Exception as e:
+                print(f"  HTML report failed: {e}")
 
-        # Agent details
-        for agent_name, result in all_results.items():
-            if agent_name == "ScorecardAgent":
-                continue  # already rendered as scorecard
-            if not isinstance(result, dict):
+        return self._result(ticker, result)
+
+    def _build_text(self, ticker, all_results, reg_ctx):
+        """Build full Markdown text report."""
+        lines = [f"# {ticker} — Finance Expert Team Report",
+                 f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
+        sc = all_results.get("ScorecardAgent", {}).get("data", {})
+        risk = all_results.get("RiskAgent", {}).get("data", {})
+        lines.append(_build_scorecard_text(sc, risk, ticker))
+        lines.append(_build_portfolio_text(all_results))
+
+        for name, result in all_results.items():
+            if name == "ScorecardAgent" or not isinstance(result, dict):
                 continue
-            lines.append(f"## {agent_name}")
+            lines.append(f"## {name}")
             if result.get("error"):
                 lines.append(f"ERROR: {result['error']}\n")
                 continue
-            data = result.get("data", {})
-            for key, val in data.items():
-                if key in _SKIP_FIELDS or val is None:
-                    continue
-                if hasattr(val, "iloc"):
-                    continue
-                if isinstance(val, float):
-                    if any(k in key for k in ["return", "drawdown", "volatility", "growth", "yield", "rate", "var_", "cvar"]):
-                        lines.append(f"- **{key}**: {val:.2%}")
-                    else:
-                        lines.append(f"- **{key}**: {val:.4f}")
-                elif isinstance(val, list):
-                    lines.append(f"- **{key}**:")
-                    for item in val:
-                        lines.append(f"  - {item}")
-                elif isinstance(val, dict):
-                    lines.append(f"- **{key}**: {json.dumps(val)}")
-                else:
-                    lines.append(f"- **{key}**: {val}")
+            lines.extend(_format_agent_data(result.get("data", {})))
             lines.append("")
 
-        # Tier 1 Regulation section
-        reg_section = self._build_regulation_section(reg_ctx)
-        if reg_section:
-            lines.append(reg_section)
-
+        lines.append(_build_regulation_text(reg_ctx))
         lines.append("---")
-        lines.append("*This report is generated by Finance Expert Team for educational purposes only.*")
-        lines.append("*It does not constitute financial advice. Always do your own research.*")
+        lines.append("*Educational purposes only. Not financial advice.*")
+        return "\n".join(lines)
 
-        report = "\n".join(lines)
-        return self._result(ticker, {"report_text": report})
+    def _build_html(self, ticker, all_results, store):
+        from agents.visual_report import build_html_report, open_in_browser
+        html = build_html_report(ticker, all_results, store)
+        path = open_in_browser(ticker, html)
+        print(f"  HTML report opened in browser: {path}")
+        return path
