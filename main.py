@@ -6,8 +6,9 @@ All functions ≤60 lines (R4). No recursion (R1).
 
 import argparse
 import os
-from agents.orchestrator import Orchestrator
+from agents.orchestrator import Orchestrator, _run_single_ticker
 from core.intent_router import ALL_AGENTS
+from memory.portfolio_store import PortfolioStore
 
 
 def run_regulation_check():
@@ -140,6 +141,86 @@ def run_analysis(args):
     # HTML report is opened in browser automatically by ReportAgent
 
 
+def _collect_criteria_results(plan):
+    """Re-run (cached) single ticker analyses and evaluate criteria. Returns dict."""
+    from core.research_parser import evaluate_criteria
+    store = PortfolioStore()
+    ticker_results = {}
+    for ticker in plan.tickers:
+        r = _run_single_ticker(ticker, plan.raw_query, plan.agents, store, silent=True)
+        if r.get("error"):
+            ticker_results[ticker] = []
+        else:
+            ticker_results[ticker] = evaluate_criteria(
+                plan.criteria, r["fund"], r["risk_data"]
+            )
+    return ticker_results
+
+
+def run_research_analysis(args):
+    """Run batch analysis driven by a research.md file."""
+    from core.research_parser import load_research_plan, format_criteria_report
+    plan = load_research_plan(args.research)
+
+    print(f"\n{'='*60}")
+    print(f"  Finance Expert Team — Research Mode")
+    print(f"  Target  : {plan.target}")
+    print(f"  Tickers : {', '.join(plan.tickers)}")
+    if plan.agents:
+        print(f"  Agents  : {', '.join(plan.agents)}")
+    if plan.time_range:
+        print(f"  Period  : {plan.time_range}")
+    print(f"  Criteria: {len(plan.criteria)} rule(s)")
+    print(f"{'='*60}")
+
+    report = Orchestrator().analyze_batch(
+        tickers=plan.tickers, query=plan.raw_query,
+        agents=plan.agents, output_format=args.format,
+    )
+    print(f"\n{report}")
+
+    if plan.criteria:
+        print("\n[Research] Evaluating criteria against agent output...")
+        ticker_results = _collect_criteria_results(plan)
+        print(format_criteria_report(ticker_results))
+
+
+def run_batch_analysis(args):
+    """Run batch analysis on a list of tickers or the watchlist."""
+    from memory.portfolio_store import PortfolioStore
+    store = PortfolioStore()
+    batch_arg = args.batch.strip()
+
+    if batch_arg.lower() == "watchlist":
+        tickers = list(store.state.watchlist)
+        if not tickers:
+            print("Watchlist is empty. Add tickers with: python main.py --portfolio watch TICKER")
+            return
+    else:
+        tickers = [t.strip().upper() for t in batch_arg.split(",") if t.strip()]
+
+    if not tickers:
+        print("No tickers to analyze.")
+        return
+
+    query = (args.query or "综合分析").strip()
+
+    print(f"\n{'='*60}")
+    print(f"  Finance Expert Team — Batch Analysis")
+    print(f"  Tickers : {', '.join(tickers)}")
+    print(f"  Query   : {query}")
+    if args.agents:
+        print(f"  Agents  : {', '.join(args.agents)}")
+    print(f"  Format  : {args.format}")
+    print(f"{'='*60}")
+
+    report = Orchestrator().analyze_batch(
+        tickers=tickers, query=query,
+        agents=args.agents, output_format=args.format,
+    )
+    print(f"\n{report}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Finance Expert Team")
     parser.add_argument("--ticker", help="Stock ticker (e.g. AAPL)")
@@ -148,16 +229,22 @@ def main():
     parser.add_argument("--format", choices=["text", "html", "both"], default="text")
     parser.add_argument("--regulate", action="store_true")
     parser.add_argument("--portfolio", nargs="*")
+    parser.add_argument("--batch", help='"watchlist" or "AAPL,NVDA,TSLA"')
+    parser.add_argument("--research", help="Path to research.md file")
     args = parser.parse_args()
 
     if args.regulate:
         run_regulation_check()
     elif args.portfolio is not None:
         run_portfolio_command(args.portfolio)
+    elif args.research:
+        run_research_analysis(args)
+    elif args.batch:
+        run_batch_analysis(args)
     elif args.ticker and args.query:
         run_analysis(args)
     else:
-        parser.error("--ticker and --query required (or use --regulate / --portfolio)")
+        parser.error("--ticker and --query required (or use --regulate / --portfolio / --batch)")
 
 
 if __name__ == "__main__":

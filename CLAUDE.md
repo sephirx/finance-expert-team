@@ -10,6 +10,15 @@ python main.py --ticker <TICKER> --query "<YOUR QUESTION>"
 python main.py --ticker <TICKER> --query "<QUESTION>" --agents fundamental technical
 python main.py --ticker <TICKER> --query "<QUESTION>" --format html
 python main.py --ticker <TICKER> --query "<QUESTION>" --format both
+
+# Batch analysis (Feature 1)
+python main.py --batch watchlist
+python main.py --batch "AAPL,NVDA,TSLA" --query "谁的估值最低"
+python main.py --batch "AAPL,NVDA,MSFT" --agents fundamental risk --format html
+
+# Research mode (Feature 2)
+python main.py --research research.md
+python main.py --research research.md --format html
 ```
 
 ## Agent Selection
