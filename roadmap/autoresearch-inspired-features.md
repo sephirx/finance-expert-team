@@ -74,7 +74,7 @@ python main.py --research research.md
 ## Feature 3：策略参数自动调优
 
 **优先级**：中高
-**状态**：待开发
+**状态**：✅ 已实现（`core/parameter_optimizer.py`，`--optimize` 入口）
 
 ### 目标
 让 agent 自动迭代 `core/config.py` 中的 signal weights，找到使回测指标最优的参数组合。
@@ -101,7 +101,7 @@ python main.py --research research.md
 ## Feature 4：Agent 提示词自动优化
 
 **优先级**：低（长期）
-**状态**：概念阶段
+**状态**：✅ 已实现（`agents/meta_optimizer.py`，`--meta-optimize` 入口）
 
 ### 目标
 类比 AutoResearch 中 agent 修改 `train.py` 的思路：
@@ -123,7 +123,8 @@ python main.py --research research.md
 
 | # | 功能 | 实现难度 | 业务价值 | 当前状态 |
 |---|------|---------|---------|---------|
-| 1 | Watchlist 批量分析 | 低 | 立即可用 | 待开发 |
-| 2 | research.md 指令系统 | 中 | 提升交互质量 | 待开发 |
-| 3 | 策略参数自动调优 | 高 | 核心竞争力 | 待开发 |
-| 4 | Agent 提示词自动优化 | 高 | 长期收益 | 概念阶段 |
+| 1 | Watchlist 批量分析 | 低 | 立即可用 | ✅ 已完成 |
+| 2 | research.md 指令系统 | 中 | 提升交互质量 | ✅ 已完成 |
+| 3 | 策略参数自动调优 | 高 | 核心竞争力 | ✅ 已完成 |
+| 4 | Agent 提示词自动优化 | 高 | 长期收益 | ✅ 已完成 |
+| 5 | --overnight 串联流水线 | 低 | 降低使用门槛 | ✅ 已完成 |

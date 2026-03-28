@@ -249,8 +249,96 @@ def run_meta_optimization(args):
     """Run autonomous agent-params optimization via Claude API."""
     from agents.meta_optimizer import run_optimization_loop
     show_log = getattr(args, "show_log", False)
-    iterations = getattr(args, "iterations", 1) or 1
+    iterations = getattr(args, "iterations", 0) or 20
     run_optimization_loop(iterations=iterations, show_log=show_log)
+
+
+def run_overnight(args):
+    """
+    Overnight pipeline: weight optimizer → meta-optimizer, driven by watchlist or ticker list.
+    Step 1: Grid-search optimal SIGNAL_WEIGHTS (parameter_optimizer).
+    Step 2: Claude-loop tune agent thresholds (meta_optimizer, N iterations).
+    """
+    from memory.portfolio_store import PortfolioStore
+    from agents.data_agent import DataAgent
+    from agents.fundamental_agent import FundamentalAgent
+    from core.parameter_optimizer import optimize_weights, save_optimal_weights
+    from agents.meta_optimizer import update_test_set, run_optimization_loop
+    import json, os
+
+    store = PortfolioStore()
+    overnight_arg = args.overnight.strip()
+
+    if overnight_arg.lower() == "watchlist":
+        tickers = list(store.state.watchlist)
+        if not tickers:
+            print("Watchlist is empty. Add tickers: python main.py --portfolio watch TICKER")
+            return
+    else:
+        tickers = [t.strip().upper() for t in overnight_arg.split(",") if t.strip()]
+
+    if not tickers:
+        print("No tickers to optimize.")
+        return
+
+    iterations = getattr(args, "iterations", 0) or 20
+
+    print(f"\n{'='*60}")
+    print(f"  Finance Expert Team — Overnight Optimization")
+    print(f"  Tickers    : {', '.join(tickers)}")
+    print(f"  Meta-iters : {iterations}")
+    print(f"{'='*60}\n")
+
+    # ── Step 1: Weight optimizer ──────────────────────────────
+    print(f"[Overnight] Step 1/2 — Signal weight optimization (grid search)...")
+    price_dfs = {}
+    fund_ratings = {}
+    for ticker in tickers:
+        print(f"  Fetching data for {ticker}...")
+        data_result = DataAgent().run(ticker)
+        if data_result.get("error"):
+            print(f"  WARNING: Could not fetch {ticker} — skipping")
+            continue
+        raw_data = data_result.get("data", {})
+        price_df = raw_data.get("price_df")
+        if price_df is None or price_df.empty:
+            print(f"  WARNING: No price data for {ticker} — skipping")
+            continue
+        price_dfs[ticker] = price_df
+        fund_result = FundamentalAgent().run(ticker, raw_data=raw_data)
+        fund_ratings[ticker] = fund_result.get("data", {}).get("rating", "HOLD")
+
+    if price_dfs:
+        best_weights, best_sharpe = optimize_weights(
+            list(price_dfs.keys()), price_dfs, fund_ratings, iterations=0
+        )
+        save_optimal_weights(best_weights, best_sharpe, list(price_dfs.keys()))
+        print(f"\n[Overnight] Step 1/2 done. Optimal weights saved.")
+    else:
+        print("[Overnight] Step 1/2 skipped — no valid price data.")
+
+    # ── Step 2: Meta-optimizer ────────────────────────────────
+    print(f"\n[Overnight] Step 2/2 — Agent param optimization ({iterations} iterations)...")
+    update_test_set(tickers)
+    run_optimization_loop(iterations=iterations)
+
+    # ── Summary ───────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  Overnight Optimization Complete")
+    print(f"  Tickers : {', '.join(tickers)}")
+    if price_dfs:
+        print(f"  Weights : fund={best_weights['fundamental']:.2f}  "
+              f"tech={best_weights['technical']:.2f}  "
+              f"sent={best_weights['sentiment']:.2f}  "
+              f"(Sharpe={best_sharpe:.4f})")
+    log_path = os.path.join(os.path.dirname(__file__), "optimization", "experiment_log.tsv")
+    if os.path.exists(log_path):
+        with open(log_path) as f:
+            lines = [l for l in f.readlines() if l.strip() and not l.startswith("iteration")]
+        kept = sum(1 for l in lines if "\tkeep\t" in l)
+        discarded = sum(1 for l in lines if "\tdiscard\t" in l)
+        print(f"  Params  : {kept} mutations kept, {discarded} discarded (lifetime)")
+    print(f"{'='*60}\n")
 
 
 def run_batch_analysis(args):
@@ -306,6 +394,8 @@ def main():
                         help="Run autonomous agent-params optimization (uses Claude API)")
     parser.add_argument("--show-log", action="store_true",
                         help="Show experiment log (use with --meta-optimize)")
+    parser.add_argument("--overnight",
+                        help='"watchlist" or "AAPL,NVDA,TSLA" — full overnight: weight + param optimization')
     args = parser.parse_args()
 
     if args.regulate:
@@ -314,6 +404,8 @@ def main():
         run_portfolio_command(args.portfolio)
     elif args.research:
         run_research_analysis(args)
+    elif args.overnight:
+        run_overnight(args)
     elif getattr(args, "meta_optimize", False):
         run_meta_optimization(args)
     elif args.optimize:
@@ -323,7 +415,7 @@ def main():
     elif args.ticker and args.query:
         run_analysis(args)
     else:
-        parser.error("--ticker and --query required (or use --regulate / --portfolio / --batch / --optimize / --meta-optimize)")
+        parser.error("--ticker and --query required (or use --regulate / --portfolio / --batch / --optimize / --meta-optimize / --overnight)")
 
 
 if __name__ == "__main__":

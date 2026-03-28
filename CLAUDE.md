@@ -19,6 +19,20 @@ python main.py --batch "AAPL,NVDA,MSFT" --agents fundamental risk --format html
 # Research mode (Feature 2)
 python main.py --research research.md
 python main.py --research research.md --format html
+
+# Optimization (Feature 3: signal weights via backtesting)
+python main.py --optimize watchlist              # grid search over watchlist
+python main.py --optimize "AAPL,NVDA,MSFT"
+python main.py --optimize watchlist --iterations 50  # random search
+
+# Meta-optimization (Feature 4: agent thresholds via Claude loop)
+python main.py --meta-optimize                   # 20 iterations (default)
+python main.py --meta-optimize --iterations 50
+python main.py --meta-optimize --show-log        # view experiment history
+
+# Overnight pipeline (Features 3+4 combined — run before sleep)
+python main.py --overnight watchlist             # weight + param tuning, 20 meta-iters
+python main.py --overnight "AAPL,NVDA,MSFT" --iterations 50
 ```
 
 ## Agent Selection

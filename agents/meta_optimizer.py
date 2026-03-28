@@ -143,6 +143,24 @@ def _apply_mutation(params: dict, mutation: dict) -> dict:
     return new_params
 
 
+def update_test_set(tickers: list, agents: list | None = None) -> None:
+    """Overwrite test_set.json with provided tickers (and optionally agents)."""
+    current = _load_test_set()
+    payload = {
+        "tickers": tickers,
+        "agents": agents if agents is not None else current.get("agents", ["fundamental", "technical", "risk"]),
+        "composite_weights": current.get("composite_weights", {
+            "hit_rate_30d": 0.40,
+            "hit_rate_90d": 0.30,
+            "sharpe_score": 0.20,
+            "grade_score": 0.10,
+        }),
+    }
+    with open(_TEST_SET_PATH, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"[MetaOptimizer] test_set updated → {tickers}")
+
+
 def run_optimization_loop(iterations: int = 50, show_log: bool = False):
     """Main optimization loop. Runs for `iterations` rounds."""
     if show_log:
