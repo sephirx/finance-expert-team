@@ -1,3 +1,4 @@
+import concurrent.futures
 import requests
 from core.base_agent import BaseAgent
 from core.config import ALPHA_VANTAGE_KEY, NEWS_API_KEY, FINANCIAL_DATASETS_API_KEY, FDS_BASE_URL
@@ -77,7 +78,14 @@ class SentimentAgent(BaseAgent):
         if not ticker or not isinstance(ticker, str):
             return self._error(str(ticker), "Invalid ticker for SentimentAgent.")
         try:
-            news = self._fetch_fds_news(ticker) or self._fetch_av_news(ticker) or self._fetch_newsapi(ticker)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+                f_fds  = ex.submit(self._fetch_fds_news, ticker)
+                f_av   = ex.submit(self._fetch_av_news, ticker)
+                f_news = ex.submit(self._fetch_newsapi, ticker)
+                r_fds  = f_fds.result()
+                r_av   = f_av.result()
+                r_news = f_news.result()
+            news = r_fds or r_av or r_news
 
             # Aggregate sentiment score
             scored = [n for n in news if n.get("score") != 0]

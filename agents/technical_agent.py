@@ -5,6 +5,7 @@ All functions ≤60 lines (R4). No recursion (R1).
 
 import pandas as pd
 from core.base_agent import BaseAgent
+from core.param_loader import get_params
 
 SERIES_LENGTH = 252
 
@@ -50,6 +51,7 @@ def _compute_bollinger(close, sma20_series):
 
 def _score_signals(price, sma20, sma50, sma200, rsi, macd, signal):
     """Score technical signals. Returns (score, notes)."""
+    p = get_params("technical")
     score = 0
     notes = []
 
@@ -63,8 +65,8 @@ def _score_signals(price, sma20, sma50, sma200, rsi, macd, signal):
         if price > sma200: score += 1; notes.append("Price above SMA200 — long-term uptrend")
         else:              score -= 1; notes.append("Price below SMA200 — long-term downtrend")
 
-    if rsi < 30:       score += 1; notes.append(f"RSI {rsi:.1f} — oversold, potential bounce")
-    elif rsi > 70:     score -= 1; notes.append(f"RSI {rsi:.1f} — overbought, caution")
+    if rsi < p["rsi_oversold"]:    score += 1; notes.append(f"RSI {rsi:.1f} — oversold, potential bounce")
+    elif rsi > p["rsi_overbought"]: score -= 1; notes.append(f"RSI {rsi:.1f} — overbought, caution")
 
     if macd > signal:  score += 1; notes.append("MACD above signal — bullish momentum")
     else:              score -= 1; notes.append("MACD below signal — bearish momentum")
@@ -136,9 +138,10 @@ class TechnicalAgent(BaseAgent):
 
         score, notes = _score_signals(price, sma20, sma50, sma200, rsi, macd_val, sig_val)
 
-        if score >= 3:     trend_signal = "BULLISH"
-        elif score <= -3:  trend_signal = "BEARISH"
-        else:              trend_signal = "NEUTRAL"
+        tp = get_params("technical")
+        if score >= tp["bullish_threshold"]:     trend_signal = "BULLISH"
+        elif score <= tp["bearish_threshold"]:   trend_signal = "BEARISH"
+        else:                                    trend_signal = "NEUTRAL"
 
         series = _build_series(close, price_df, smas, rsi_series,
                                macd_line, signal_line, hist_series, bb_up, bb_low)

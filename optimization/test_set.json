@@ -1,0 +1,10 @@
+{
+  "tickers": ["AAPL", "NVDA", "MSFT", "JPM", "META"],
+  "agents": ["fundamental", "technical", "risk"],
+  "composite_weights": {
+    "hit_rate_30d": 0.40,
+    "hit_rate_90d": 0.30,
+    "sharpe_score": 0.20,
+    "grade_score": 0.10
+  }
+}

@@ -5,11 +5,20 @@ All functions ≤60 lines (R4). No recursion (R1).
 
 from core.base_agent import BaseAgent
 from core.config import SIGNAL_WEIGHTS
+from core.parameter_optimizer import load_optimal_weights
 from memory.portfolio_store import PortfolioStore
 
 _FUND_MAP = {"BUY": 1, "HOLD": 0, "SELL": -1}
 _TECH_MAP = {"BULLISH": 1, "NEUTRAL": 0, "BEARISH": -1}
 _SENT_MAP = {"POSITIVE": 1, "NEUTRAL": 0, "NEGATIVE": -1}
+
+
+def _get_active_weights() -> dict:
+    """Return optimal weights if available and fresh, else fall back to config defaults."""
+    optimal = load_optimal_weights()
+    if optimal is not None:
+        return optimal
+    return SIGNAL_WEIGHTS
 
 
 def _compute_weighted_decision(fund_data, tech_data, sent_data):
@@ -18,9 +27,10 @@ def _compute_weighted_decision(fund_data, tech_data, sent_data):
     ts = _TECH_MAP.get(tech_data.get("signal", "NEUTRAL"), 0)
     ss = _SENT_MAP.get(sent_data.get("overall_sentiment", "NEUTRAL"), 0)
 
-    weighted = round(fs * SIGNAL_WEIGHTS["fundamental"] +
-                     ts * SIGNAL_WEIGHTS["technical"] +
-                     ss * SIGNAL_WEIGHTS["sentiment"], 4)
+    weights = _get_active_weights()
+    weighted = round(fs * weights["fundamental"] +
+                     ts * weights["technical"] +
+                     ss * weights["sentiment"], 4)
 
     if weighted >= 0.3:    decision = "BUY"
     elif weighted <= -0.3: decision = "SELL"

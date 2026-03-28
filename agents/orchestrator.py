@@ -87,6 +87,19 @@ def _run_phase3(intents, ticker, fund, tech, sent, risk_data, price_df, spy_df, 
     print(f"  RiskAgent: done ({_fmt(time.time() - t)})")
 
     if "portfolio" in intents or ({"fundamental", "technical"} <= intents):
+        from core.parameter_optimizer import load_optimal_weights
+        from core.config import SIGNAL_WEIGHTS
+        _active = load_optimal_weights()
+        if _active is not None:
+            print(f"[Weights] Using optimal weights: "
+                  f"fund={_active['fundamental']:.2f} "
+                  f"tech={_active['technical']:.2f} "
+                  f"sent={_active['sentiment']:.2f}")
+        else:
+            print(f"[Weights] Using default weights from config: "
+                  f"fund={SIGNAL_WEIGHTS['fundamental']:.2f} "
+                  f"tech={SIGNAL_WEIGHTS['technical']:.2f} "
+                  f"sent={SIGNAL_WEIGHTS['sentiment']:.2f}")
         t2 = time.time()
         print("[Phase 3/5] Running PortfolioAgent...")
         port_result = PortfolioAgent().run(

@@ -20,6 +20,7 @@ from core.rate_limiter import wait_if_needed
 from core.data_normalizer import normalize_financialdatasets, compute_data_quality
 
 _CACHE_EXCLUDE = {"price_df", "spy_df", "data_quality"}
+_SPY_CACHE: dict = {"df": None, "expires_at": 0.0}
 
 
 def _safe_float(val):
@@ -139,13 +140,19 @@ class DataAgent(BaseAgent):
         return self._download_prices_yfinance(ticker)
 
     def _download_spy(self) -> pd.DataFrame:
-        """Download SPY benchmark data."""
+        """Download SPY benchmark data (cached in memory for 24h)."""
+        now = time.time()
+        if _SPY_CACHE["df"] is not None and now < _SPY_CACHE["expires_at"]:
+            return _SPY_CACHE["df"]
         if FINANCIAL_DATASETS_API_KEY:
             df = self._download_prices_fds("SPY")
             if not df.empty:
+                _SPY_CACHE.update({"df": df, "expires_at": now + CACHE_EXPIRY_HOURS * 3600})
                 return df
-
-        return self._download_prices_yfinance("SPY")
+        df = self._download_prices_yfinance("SPY")
+        if not df.empty:
+            _SPY_CACHE.update({"df": df, "expires_at": now + CACHE_EXPIRY_HOURS * 3600})
+        return df
 
     # ------------------------------------------------ fundamental data
 

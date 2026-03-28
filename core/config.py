@@ -32,3 +32,15 @@ REPORTS_DIR = os.path.join(os.path.dirname(__file__), "..", "reports")
 
 # financialdatasets.ai
 FDS_BASE_URL = "https://api.financialdatasets.ai"
+
+# Strategy parameter auto-tuning (Feature 3)
+OPTIMAL_WEIGHTS_PATH   = os.path.join(DATA_DIR, "optimal_weights.json")
+WEIGHTS_STALENESS_DAYS = 7
+OPTIMIZER_PARAMS = {
+    "fixed_sentiment_weight": 0.20,
+    "coarse_step":            0.10,
+    "fine_step":              0.02,
+    "fine_top_k":             3,
+    "fine_radius":            0.10,
+    "threshold":              0.30,
+}

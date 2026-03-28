@@ -185,6 +185,74 @@ def run_research_analysis(args):
         print(format_criteria_report(ticker_results))
 
 
+def run_optimization(args):
+    """Run strategy parameter optimization to find best SIGNAL_WEIGHTS."""
+    from memory.portfolio_store import PortfolioStore
+    from agents.data_agent import DataAgent
+    from agents.fundamental_agent import FundamentalAgent
+    from core.parameter_optimizer import optimize_weights, save_optimal_weights
+
+    store = PortfolioStore()
+    opt_arg = args.optimize.strip()
+
+    if opt_arg.lower() == "watchlist":
+        tickers = list(store.state.watchlist)
+        if not tickers:
+            print("Watchlist is empty. Add tickers with: python main.py --portfolio watch TICKER")
+            return
+    else:
+        tickers = [t.strip().upper() for t in opt_arg.split(",") if t.strip()]
+
+    if not tickers:
+        print("No tickers to optimize.")
+        return
+
+    iterations = args.iterations if hasattr(args, "iterations") and args.iterations else 0
+
+    print(f"\n{'='*60}")
+    print(f"  Finance Expert Team — Strategy Optimizer")
+    print(f"  Tickers    : {', '.join(tickers)}")
+    print(f"  Search     : {'Random (' + str(iterations) + ' iters)' if iterations else 'Grid'}")
+    print(f"{'='*60}")
+
+    price_dfs = {}
+    fund_ratings = {}
+    for ticker in tickers:
+        print(f"[Optimizer] Fetching data for {ticker}...")
+        data_result = DataAgent().run(ticker)
+        if data_result.get("error"):
+            print(f"  WARNING: Could not fetch data for {ticker} — skipping")
+            continue
+        raw_data = data_result.get("data", {})
+        price_df = raw_data.get("price_df")
+        if price_df is None or price_df.empty:
+            print(f"  WARNING: No price data for {ticker} — skipping")
+            continue
+        price_dfs[ticker] = price_df
+
+        fund_result = FundamentalAgent().run(ticker, raw_data=raw_data)
+        fund_ratings[ticker] = fund_result.get("data", {}).get("rating", "HOLD")
+
+    if not price_dfs:
+        print("No valid price data available for optimization.")
+        return
+
+    best_weights, best_sharpe = optimize_weights(
+        list(price_dfs.keys()), price_dfs, fund_ratings, iterations=iterations
+    )
+    save_optimal_weights(best_weights, best_sharpe, list(price_dfs.keys()))
+
+    print(f"\n[Optimizer] Done. Next analysis run will use optimal weights automatically.")
+
+
+def run_meta_optimization(args):
+    """Run autonomous agent-params optimization via Claude API."""
+    from agents.meta_optimizer import run_optimization_loop
+    show_log = getattr(args, "show_log", False)
+    iterations = getattr(args, "iterations", 1) or 1
+    run_optimization_loop(iterations=iterations, show_log=show_log)
+
+
 def run_batch_analysis(args):
     """Run batch analysis on a list of tickers or the watchlist."""
     from memory.portfolio_store import PortfolioStore
@@ -231,6 +299,13 @@ def main():
     parser.add_argument("--portfolio", nargs="*")
     parser.add_argument("--batch", help='"watchlist" or "AAPL,NVDA,TSLA"')
     parser.add_argument("--research", help="Path to research.md file")
+    parser.add_argument("--optimize", help='Ticker(s) or "watchlist" — tune SIGNAL_WEIGHTS')
+    parser.add_argument("--iterations", type=int, default=0,
+                        help="0=grid search (default), N>0=random search with N samples")
+    parser.add_argument("--meta-optimize", action="store_true",
+                        help="Run autonomous agent-params optimization (uses Claude API)")
+    parser.add_argument("--show-log", action="store_true",
+                        help="Show experiment log (use with --meta-optimize)")
     args = parser.parse_args()
 
     if args.regulate:
@@ -239,12 +314,16 @@ def main():
         run_portfolio_command(args.portfolio)
     elif args.research:
         run_research_analysis(args)
+    elif getattr(args, "meta_optimize", False):
+        run_meta_optimization(args)
+    elif args.optimize:
+        run_optimization(args)
     elif args.batch:
         run_batch_analysis(args)
     elif args.ticker and args.query:
         run_analysis(args)
     else:
-        parser.error("--ticker and --query required (or use --regulate / --portfolio / --batch)")
+        parser.error("--ticker and --query required (or use --regulate / --portfolio / --batch / --optimize / --meta-optimize)")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ All functions ≤60 lines (R4). No recursion (R1).
 import numpy as np
 import pandas as pd
 from core.base_agent import BaseAgent
+from core.param_loader import get_params
 
 
 def compute_hit_rate(closes: pd.Series, signal: str) -> dict:
@@ -86,22 +87,23 @@ def compute_agreement(fund_data, tech_data, sent_data):
 
 def compute_grade(hit_rates, sharpe, calmar, agreement, alpha):
     """Compute team grade from metrics."""
+    p = get_params("scorecard")
     grade_score = 0
     max_score = 0
 
     if hit_rates.get("30d") is not None:
         max_score += 1
-        if hit_rates["30d"] > 0.55: grade_score += 1
+        if hit_rates["30d"] > p["hit_rate_min"]: grade_score += 1
     if hit_rates.get("90d") is not None:
         max_score += 1
-        if hit_rates["90d"] > 0.55: grade_score += 1
+        if hit_rates["90d"] > p["hit_rate_min"]: grade_score += 1
 
     max_score += 2
-    if sharpe > 1:     grade_score += 2
-    elif sharpe > 0.3: grade_score += 1
+    if sharpe > p["sharpe_excellent"]:   grade_score += 2
+    elif sharpe > p["sharpe_ok"]:        grade_score += 1
 
     max_score += 1
-    if calmar > 0.3: grade_score += 1
+    if calmar > p["calmar_min"]: grade_score += 1
 
     if agreement != "N/A":
         max_score += 1
@@ -111,10 +113,10 @@ def compute_grade(hit_rates, sharpe, calmar, agreement, alpha):
     if alpha > 0: grade_score += 1
 
     ratio = grade_score / max_score if max_score > 0 else 0
-    if ratio >= 0.75:   return "A"
-    elif ratio >= 0.60: return "B+"
-    elif ratio >= 0.45: return "B"
-    elif ratio >= 0.30: return "C"
+    if ratio >= p["grade_A"]:     return "A"
+    elif ratio >= p["grade_Bplus"]: return "B+"
+    elif ratio >= p["grade_B"]:   return "B"
+    elif ratio >= p["grade_C"]:   return "C"
     return "D"
 
 

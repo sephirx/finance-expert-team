@@ -20,6 +20,9 @@ class MemoryManager:
     def __init__(self, path: str = ANALYSIS_HISTORY_PATH):
         self._path = path
         self._records = self._load()
+        self._ticker_idx: dict[str, list[int]] = {}
+        for i, r in enumerate(self._records):
+            self._ticker_idx.setdefault(r.ticker, []).append(i)
 
     def _load(self) -> list[AnalysisRecord]:
         if os.path.exists(self._path):
@@ -56,14 +59,19 @@ class MemoryManager:
             query=query,
         )
         self._records.append(record)
+        self._ticker_idx.setdefault(record.ticker, []).append(len(self._records) - 1)
         # Cap at MAX_RECORDS — remove oldest
         if len(self._records) > MAX_RECORDS:
             self._records = self._records[-MAX_RECORDS:]
+            self._ticker_idx = {}
+            for i, r in enumerate(self._records):
+                self._ticker_idx.setdefault(r.ticker, []).append(i)
         self._save()
 
     def get_history(self, ticker: str) -> list[AnalysisRecord]:
         ticker = ticker.upper().strip()
-        return [r for r in self._records if r.ticker == ticker]
+        indices = self._ticker_idx.get(ticker, [])
+        return [self._records[i] for i in indices]
 
     def get_recent(self, n: int = 10) -> list[AnalysisRecord]:
         return self._records[-n:]

@@ -1,4 +1,5 @@
 from core.base_agent import BaseAgent
+from core.param_loader import get_params
 
 
 def _sf(val):
@@ -14,28 +15,29 @@ def _sf(val):
 
 def _score_fundamentals(pe, roe, de, rev_g, upside):
     """Score fundamental metrics. Returns (score, notes)."""
+    p = get_params("fundamental")
     score = 0
     notes = []
 
     if pe is not None:
-        if pe < 15:    score += 1; notes.append("P/E below 15 — cheap")
-        elif pe > 30:  score -= 1; notes.append("P/E above 30 — expensive")
+        if pe < p["pe_cheap"]:       score += 1; notes.append(f"P/E below {p['pe_cheap']} — cheap")
+        elif pe > p["pe_expensive"]: score -= 1; notes.append(f"P/E above {p['pe_expensive']} — expensive")
 
     if roe is not None:
-        if roe > 0.15:   score += 1; notes.append("ROE > 15% — strong profitability")
-        elif roe < 0.05: score -= 1; notes.append("ROE < 5% — weak profitability")
+        if roe > p["roe_strong"]:   score += 1; notes.append(f"ROE > {p['roe_strong']*100:.0f}% — strong profitability")
+        elif roe < p["roe_weak"]:   score -= 1; notes.append(f"ROE < {p['roe_weak']*100:.0f}% — weak profitability")
 
     if de is not None:
-        if de > 200:   score -= 1; notes.append("High debt-to-equity — leverage risk")
-        elif de < 50:  score += 1; notes.append("Low debt — healthy balance sheet")
+        if de > p["de_high"]:   score -= 1; notes.append("High debt-to-equity — leverage risk")
+        elif de < p["de_low"]:  score += 1; notes.append("Low debt — healthy balance sheet")
 
     if rev_g is not None:
-        if rev_g > 0.10:  score += 1; notes.append("Revenue growing >10% YoY")
-        elif rev_g < 0:   score -= 1; notes.append("Revenue declining")
+        if rev_g > p["rev_growth_good"]:  score += 1; notes.append(f"Revenue growing >{p['rev_growth_good']*100:.0f}% YoY")
+        elif rev_g < 0:                   score -= 1; notes.append("Revenue declining")
 
     if upside is not None:
-        if upside > 10:   score += 1; notes.append(f"Analyst target implies {upside}% upside")
-        elif upside < -10: score -= 1; notes.append(f"Analyst target implies {abs(upside)}% downside")
+        if upside > p["upside_bullish"]:    score += 1; notes.append(f"Analyst target implies {upside}% upside")
+        elif upside < p["upside_bearish"]:  score -= 1; notes.append(f"Analyst target implies {abs(upside)}% downside")
 
     return score, notes
 
@@ -78,9 +80,10 @@ class FundamentalAgent(BaseAgent):
 
         score, notes = _score_fundamentals(pe, roe, de, rev_g, upside)
 
-        if score >= 2:     rating = "BUY"
-        elif score <= -2:  rating = "SELL"
-        else:              rating = "HOLD"
+        p = get_params("fundamental")
+        if score >= p["buy_threshold"]:      rating = "BUY"
+        elif score <= p["sell_threshold"]:   rating = "SELL"
+        else:                                rating = "HOLD"
 
         return self._result(ticker, {
             "rating": rating, "score": score,

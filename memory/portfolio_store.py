@@ -17,6 +17,10 @@ class PortfolioStore:
     def __init__(self, path: str = PORTFOLIO_STATE_PATH):
         self._path = path
         self._state = self._load()
+        self._idx: dict[str, int] = {h.ticker: i for i, h in enumerate(self._state.holdings)}
+
+    def _rebuild_idx(self):
+        self._idx = {h.ticker: i for i, h in enumerate(self._state.holdings)}
 
     def _load(self) -> PortfolioState:
         if os.path.exists(self._path):
@@ -37,40 +41,38 @@ class PortfolioStore:
 
     def add_holding(self, ticker: str, shares: float, avg_cost: float):
         ticker = ticker.upper().strip()
-        # If already held, average in
-        for h in self._state.holdings:
-            if h.ticker == ticker:
-                total_shares = h.shares + shares
-                h.avg_cost = round(
-                    (h.avg_cost * h.shares + avg_cost * shares) / total_shares, 4
-                )
-                h.shares = total_shares
-                self.save()
-                return
-        self._state.holdings.append(
-            Holding(ticker=ticker, shares=shares, avg_cost=avg_cost,
-                    date_added=date.today().isoformat())
-        )
+        i = self._idx.get(ticker)
+        if i is not None:
+            h = self._state.holdings[i]
+            total = h.shares + shares
+            h.avg_cost = round((h.avg_cost * h.shares + avg_cost * shares) / total, 4)
+            h.shares = total
+        else:
+            self._state.holdings.append(
+                Holding(ticker=ticker, shares=shares, avg_cost=avg_cost,
+                        date_added=date.today().isoformat())
+            )
+            self._idx[ticker] = len(self._state.holdings) - 1
         self.save()
 
     def remove_holding(self, ticker: str, shares: float | None = None):
         ticker = ticker.upper().strip()
-        for i, h in enumerate(self._state.holdings):
-            if h.ticker == ticker:
-                if shares is None or shares >= h.shares:
-                    self._state.holdings.pop(i)
-                else:
-                    h.shares -= shares
-                self.save()
-                return True
-        return False
+        i = self._idx.get(ticker)
+        if i is None:
+            return False
+        h = self._state.holdings[i]
+        if shares is None or shares >= h.shares:
+            self._state.holdings.pop(i)
+            self._rebuild_idx()
+        else:
+            h.shares -= shares
+        self.save()
+        return True
 
     def get_holding(self, ticker: str) -> Holding | None:
         ticker = ticker.upper().strip()
-        for h in self._state.holdings:
-            if h.ticker == ticker:
-                return h
-        return None
+        i = self._idx.get(ticker)
+        return self._state.holdings[i] if i is not None else None
 
     def get_all_holdings(self) -> list[Holding]:
         return self._state.holdings
